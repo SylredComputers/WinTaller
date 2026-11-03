@@ -1,0 +1,7 @@
+# Los .bat y .ps1 deben conservar finales de linea de Windows (CRLF)
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.md  text eol=crlf
+*.ico binary
+*.png binary

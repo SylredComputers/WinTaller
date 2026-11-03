@@ -1,0 +1,9 @@
+# Archivos que genera el programa al ejecutarse (pueden contener datos del equipo)
+diagnostico.log
+Informes/
+Drivers-*/
+snapshots/
+Respaldo-*/
+wintaller_*.png
+optimizar_*.png
+*.zip
