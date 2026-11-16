@@ -274,7 +274,7 @@ Opciones útiles que Windows trae desactivadas. A diferencia del resto, estos aj
 | **Salud de los discos** | Salud, temperatura, desgaste del SSD, horas de uso y errores de lectura/escritura (SMART), y espacio libre de cada unidad. Temperatura y desgaste necesitan administrador. |
 | **Pantallazos y apagados** | Pantallazos azules (con su código) y apagados inesperados de los últimos 60 días, y los minivolcados guardados. |
 | **Test de memoria RAM** | Abre el Diagnóstico de memoria de Windows para hacer la prueba al reiniciar. |
-| **Informe de batería** | Solo portátiles: informe de Windows con la capacidad real, los ciclos y la autonomía, en el Escritorio. |
+| **Informe de batería** | Solo portátiles: informe de Windows con la capacidad real, los ciclos y la autonomía, en el Escritorio, con la fecha en el nombre. |
 
 ## Sistema › Drivers (componentes y controladores)
 
@@ -472,12 +472,18 @@ La columna **Valoración** combina el riesgo del puerto con su alcance: *Revisar
 - La pestaña **Copias** escribe en el disco de destino. La copia de carpetas **no borra nada en el origen**, pero sí puede sobrescribir archivos con el mismo nombre en el destino; elige una carpeta vacía o específica. La imagen del sistema **necesita administrador**, otra unidad NTFS y espacio libre; se crea con `wbadmin` y no se puede cancelar de forma limpia a mitad, así que no la interrumpas. Una copia en el mismo disco físico que el original no protege frente a un fallo del disco.
 - La pestaña **Puertos** valora el cortafuegos de forma orientativa (reglas de entrada de Windows para el perfil de red activo); no ve el router ni otros cortafuegos. **Bloquear puerto** crea reglas en el grupo *WinTaller* del cortafuegos de Windows.
 - La pestaña **Privacidad** cambia servicios, tareas programadas, directivas del registro y variables de entorno. Todo se puede volver a activar desde la propia pestaña. Los elementos del grupo *Otros detectados* se identifican solo por su nombre: revísalos antes de desactivarlos.
-- Los ajustes de usuario (`HKCU`) se aplican a la cuenta con la que se elevó el programa: si un usuario estándar eleva con la cuenta de otro administrador, se aplican al perfil de ese administrador.
+- Los ajustes de usuario (`HKCU`) se aplican a la cuenta con la que se elevó el programa: si un usuario estándar eleva con la cuenta de otro administrador, se aplican al perfil de ese administrador. WinTaller lo detecta al arrancar, avisa y lo indica en la barra inferior.
 - Se necesita PowerShell 5.1 (Windows 10/11). En Windows 7 faltan algunos comandos; las tareas afectadas se omiten con un aviso.
 - Es un script sin firma digital: algunos antivirus pueden marcarlo como sospechoso. Es código abierto y legible en `WinTaller.ps1`.
 - Ejecutar desde una memoria USB funciona, siempre que la ruta sea accesible.
 
 ---
+
+### Protecciones añadidas en la versión 2.1.1
+
+- **Navegador sin permisos de administrador:** las páginas web (soporte del fabricante, Microsoft Store) y los informes se abren a través del Explorador, con la sesión normal del usuario, aunque WinTaller esté elevado.
+- **Rutas completas:** las herramientas de Windows (`powershell`, `reg`, `sc`, `powercfg`, `robocopy`…) se ejecutan desde `System32`, nunca desde la carpeta del programa ni el PATH. `Iniciar.bat` y `Diagnostico.bat` también.
+- **Instaladores descargados:** además de la firma digital válida, se comprueba que el firmante sea el esperado (TinyWall: Károly Dávid Pados).
 
 ### Protecciones añadidas en la versión 1.7.0
 
@@ -498,7 +504,7 @@ WinTaller\                 (la carpeta que descomprimes)
 ├─ Iniciar.bat             Lanzador con elevación de permisos
 ├─ Diagnostico.bat         Lanzador que conserva la consola abierta
 ├─ WinTaller.ps1    Programa completo (interfaz + lógica)
-├─ diagnostico.log         Se crea al ejecutar (pasos y errores)
+├─ diagnostico.log         Se crea al ejecutar (pasos y errores); al pasar de 1 MB se guarda como diagnostico.anterior.log
 
 C:\ProgramData\WinTaller\   (solo SYSTEM y Administradores)
 ├─ snapshots\              Copias de ajustes para «Revertir cambios»

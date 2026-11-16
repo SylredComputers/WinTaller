@@ -1,5 +1,20 @@
 # Historial de cambios
 
+## v2.1.1
+
+Correcciones de la auditoría de seguridad (ISO/IEC 27001 / 27002).
+
+**Seguridad**
+- Las páginas web y los informes se abren con la sesión normal del usuario: el navegador ya no arranca con permisos de administrador.
+- El instalador de TinyWall solo se ejecuta si lo firma su autor (Károly Dávid Pados), no basta con cualquier firma válida.
+- Las herramientas de Windows se ejecutan por su ruta completa en `System32`, también en `Iniciar.bat` y `Diagnostico.bat`. Los desinstaladores que indican un programa sin ruta (`rundll32.exe`…) se buscan en `System32`.
+- Aviso al arrancar si el programa se eleva con la cuenta de otro administrador: los ajustes de usuario irían a esa cuenta.
+
+**Mejoras**
+- `diagnostico.log` se renueva al pasar de 1 MB (se conserva el anterior como `diagnostico.anterior.log`).
+- El informe de batería lleva la fecha en el nombre y ya no sobrescribe el anterior.
+- El informe del equipo indica que contiene datos confidenciales.
+
 ## v2.1.0
 
 **Novedades**

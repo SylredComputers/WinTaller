@@ -1,5 +1,5 @@
 # Archivos que genera el programa al ejecutarse (pueden contener datos del equipo)
-diagnostico.log
+diagnostico*.log
 Informes/
 Drivers-*/
 snapshots/

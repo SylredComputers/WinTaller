@@ -42,7 +42,7 @@ try {
 } catch { }
 
 $script:AppName    = 'WinTaller'
-$script:AppVersion = '2.1.0'
+$script:AppVersion = '2.1.1'
 $script:IsAdmin    = $false
 $script:busy       = $false
 $script:optCancel  = $false
@@ -106,11 +106,59 @@ function Test-IsAdmin {
     }
 }
 
+# Abre una página web o un documento con la sesión normal del usuario.
+# explorer.exe entrega la orden al Explorador que ya está abierto, que no tiene
+# permisos de administrador: así el navegador no arranca elevado.
+function Open-AsDesktopUser {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    $explorador = Join-Path $env:SystemRoot 'explorer.exe'
+    if ($script:IsAdmin -and (Test-Path -LiteralPath $explorador)) {
+        Start-Process -FilePath $explorador -ArgumentList ('"{0}"' -f $Target) | Out-Null
+    } else {
+        Start-Process -FilePath $Target | Out-Null
+    }
+}
+
+# Usuario que tiene abierta la sesión de Windows (dueño del Explorador de esta
+# sesión) frente al usuario con el que se ejecuta el programa. Si alguien eleva
+# con la cuenta de otro administrador, los ajustes de usuario (HKCU) se aplican
+# a esa otra cuenta.
+function Get-SessionUserInfo {
+    $proceso = ''
+    try { $proceso = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { }
+    $sesion = ''
+    try {
+        $idSesion = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $explorador = Get-CimInstance -ClassName Win32_Process -Filter ("Name='explorer.exe' AND SessionId={0}" -f $idSesion) -ErrorAction Stop | Select-Object -First 1
+        if ($explorador) {
+            $duenio = Invoke-CimMethod -InputObject $explorador -MethodName GetOwner -ErrorAction Stop
+            if ($duenio.ReturnValue -eq 0 -and $duenio.User) { $sesion = ('{0}\{1}' -f $duenio.Domain, $duenio.User) }
+        }
+    } catch { }
+    return [pscustomobject]@{
+        Process  = $proceso
+        Session  = $sesion
+        Mismatch = [bool]($sesion -and $proceso -and -not [string]::Equals($sesion, $proceso, [System.StringComparison]::OrdinalIgnoreCase))
+    }
+}
+
 # Registro de diagnóstico (se escribe junto al script; si no se puede, en TEMP)
 $script:BaseDir = $PSScriptRoot
 if (-not $script:BaseDir) { $script:BaseDir = (Get-Location).Path }
 $script:DiagFile = Join-Path $script:BaseDir 'diagnostico.log'
 $script:DiagFallback = Join-Path $env:TEMP 'WinTaller_diagnostico.log'
+
+# Al pasar de 1 MB se guarda como ".anterior.log" (sustituye al anterior) y se
+# empieza uno nuevo, para que el registro no crezca sin límite.
+foreach ($registro in @($script:DiagFile, $script:DiagFallback)) {
+    try {
+        $infoRegistro = Get-Item -LiteralPath $registro -Force -ErrorAction Stop
+        if ($infoRegistro.Length -gt 1MB) {
+            $anterior = [System.IO.Path]::ChangeExtension($registro, '.anterior.log')
+            Move-Item -LiteralPath $registro -Destination $anterior -Force -ErrorAction Stop
+        }
+    } catch { }
+}
 
 function Write-Diag {
     param([string]$Message)
@@ -169,7 +217,7 @@ function Restart-Elevated {
     }
     try {
         $arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
-        Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs | Out-Null
+        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Verb RunAs | Out-Null
         return $true
     } catch {
         return $false
@@ -1555,7 +1603,7 @@ function Start-MsiAppInstall {
     if ($App.MsiArgs) { $extra = [string]$App.MsiArgs }
     $argumentos = @('/i', ('"' + $archivo + '"')) + @($extra -split '\s+' | Where-Object { $_ })
     try {
-        $script:wingetProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList $argumentos -PassThru -WindowStyle Hidden
+        $script:wingetProcess = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\msiexec.exe') -ArgumentList $argumentos -PassThru -WindowStyle Hidden
         $script:wingetProcess.EnableRaisingEvents = $true
         $script:wingetStarted = Get-Date
         $script:wingetTimer.Start()
@@ -1660,7 +1708,7 @@ function Stop-WingetProcess {
     if (-not $proc) { return }
     try {
         if (-not $proc.HasExited) {
-            & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null
         }
     } catch {
         try { $proc.Kill() } catch { }
@@ -2244,8 +2292,8 @@ $script:tasks = @(
         Recommended = $true
         Confirm     = $null
         Run         = {
-            & ipconfig.exe /flushdns 2>&1 | Out-Null
-            & ipconfig.exe /registerdns 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\ipconfig.exe" /flushdns 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\ipconfig.exe" /registerdns 2>&1 | Out-Null
             Write-Log 'Cache DNS vaciada y nombres DNS registrados de nuevo.' 'OK'
         }
     },
@@ -2358,7 +2406,7 @@ $script:tasks = @(
             $letter = $env:SystemDrive.TrimEnd(':')
             Write-Log ("Optimizando la unidad {0} con Optimize-Volume..." -f $letter)
             $comandoOptimizar = "Optimize-Volume -DriveLetter '{0}' -ErrorAction Stop" -f $letter
-            $codigo = Invoke-OptCancelableProcess -File 'powershell.exe' -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$comandoOptimizar) -Label 'Optimize-Volume'
+            $codigo = Invoke-OptCancelableProcess -File (Join-Path $PSHOME 'powershell.exe') -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$comandoOptimizar) -Label 'Optimize-Volume'
             if ($script:optCancel) {
                 Write-Log 'Optimización del disco cancelada por el usuario.' 'WARN'
                 return
@@ -2605,10 +2653,10 @@ $script:tasks = @(
         Confirm     = 'Se restablecerá la configuración de red y habrá que REINICIAR. Si tienes VPN o reglas de red especiales, se perderan. Continuar?'
         Run         = {
             Write-Log 'Restableciendo Winsock...'
-            try { & netsh.exe winsock reset 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\netsh.exe" winsock reset 2>&1 | Out-Null } catch { }
             Write-Log 'Restableciendo la pila IP...'
-            try { & netsh.exe int ip reset 2>&1 | Out-Null } catch { }
-            try { & ipconfig.exe /flushdns 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\netsh.exe" int ip reset 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\ipconfig.exe" /flushdns 2>&1 | Out-Null } catch { }
             Write-Log 'Red restablecida. Reinicia el equipo para terminar.' 'OK'
         }
     }
@@ -2626,7 +2674,7 @@ function Invoke-OptCancelableProcess {
         try { $terminado = $script:optProcess.HasExited } catch { $terminado = $true }
         if ($terminado) { break }
         if ($script:optCancel) {
-            try { & taskkill.exe /PID $script:optProcess.Id /T /F 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $script:optProcess.Id /T /F 2>&1 | Out-Null } catch { }
             Start-Sleep -Milliseconds 600
             break
         }
@@ -2715,7 +2763,7 @@ function Save-OptimizationSnapshot {
             $destino = Join-Path $regDir $clave.File
             $rutaReg = ConvertTo-RegExportPath $clave.Path
             try {
-                & reg.exe export $rutaReg $destino /y 2>&1 | Out-Null
+                & "$env:SystemRoot\System32\reg.exe" export $rutaReg $destino /y 2>&1 | Out-Null
                 if (Test-Path -LiteralPath $destino) { $archivosReg += $destino }
             } catch { }
         }
@@ -2733,7 +2781,7 @@ function Save-OptimizationSnapshot {
 
         $esquema = ''
         try {
-            $salida = (& powercfg.exe /getactivescheme 2>&1 | Out-String)
+            $salida = (& "$env:SystemRoot\System32\powercfg.exe" /getactivescheme 2>&1 | Out-String)
             $m = [regex]::Match($salida, '\{[0-9a-fA-F-]{36}\}')
             if ($m.Success) { $esquema = $m.Value }
         } catch { }
@@ -2814,7 +2862,7 @@ function Revert-Optimization {
                     'Manual'   { 'demand' }
                     'Disabled' { 'disabled' }
                 }
-                $salidaSc = & sc.exe config $nombreSvc start= $valorSc 2>&1 | Out-String
+                $salidaSc = & "$env:SystemRoot\System32\sc.exe" config $nombreSvc start= $valorSc 2>&1 | Out-String
                 if ($LASTEXITCODE -ne 0) { throw $salidaSc.Trim() }
                 if ([string]$servicio.State -eq 'Running' -and [string]$actual.State -ne 'Running' -and $modo -ne 'Disabled') {
                     Start-Service -Name $nombreSvc -ErrorAction SilentlyContinue
@@ -2863,7 +2911,7 @@ function Revert-Optimization {
                 continue
             }
             try {
-                & reg.exe import $archivo 2>&1 | Out-Null
+                & "$env:SystemRoot\System32\reg.exe" import $archivo 2>&1 | Out-Null
                 $regOk++
             } catch { $errores++ }
         }
@@ -2871,7 +2919,7 @@ function Revert-Optimization {
 
         if ($datos.PowerScheme) {
             try {
-                & powercfg.exe /setactive ([string]$datos.PowerScheme) 2>&1 | Out-Null
+                & "$env:SystemRoot\System32\powercfg.exe" /setactive ([string]$datos.PowerScheme) 2>&1 | Out-Null
                 Write-Log ('Plan de energía restaurado: {0}' -f $datos.PowerScheme) 'OK'
             } catch { $errores++ }
         }
@@ -3038,8 +3086,8 @@ if ($SelfTest) {
 
     Write-Host ''
     Write-Host '--- Copias de seguridad ---'
-    $robo = Get-Command robocopy.exe -ErrorAction SilentlyContinue
-    $wb   = Get-Command wbadmin.exe -ErrorAction SilentlyContinue
+    $robo = Get-Command (Join-Path $env:SystemRoot 'System32\robocopy.exe') -ErrorAction SilentlyContinue
+    $wb   = Get-Command (Join-Path $env:SystemRoot 'System32\wbadmin.exe') -ErrorAction SilentlyContinue
     if ($robo) { Write-Host ('robocopy: {0}' -f $robo.Source) } else { Write-Host 'robocopy: NO disponible' }
     if ($wb) { Write-Host ('wbadmin: {0}' -f $wb.Source) } else { Write-Host 'wbadmin: NO disponible' }
     $conocidas = @(
@@ -3086,6 +3134,19 @@ if (-not $SelfTest -and -not $UiSmokeTest) {
             'El programa ya está abierto. Usa la ventana que tienes abierta.',
             $script:AppName, 'OK', 'Information')
         exit 0
+    }
+}
+
+# Elevación con la cuenta de otro administrador: los ajustes de usuario
+# (Rendimiento, Privacidad, Inicio del usuario) irían a esa otra cuenta.
+$script:SessionUser = $null
+if ($script:IsAdmin -and -not $SelfTest) {
+    $script:SessionUser = Get-SessionUserInfo
+    Write-Diag ('Usuario del programa: {0} | usuario de la sesión: {1}' -f $script:SessionUser.Process, $script:SessionUser.Session)
+    if ($script:SessionUser.Mismatch -and -not $UiSmokeTest) {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            ("WinTaller se está ejecutando con la cuenta de administrador «{0}», pero la sesión abierta es de «{1}».`n`nLos ajustes de usuario (pestañas Rendimiento y Privacidad, y programas de Inicio del usuario) se aplicarán a «{0}», no a «{1}».`n`nPara aplicarlos a «{1}», esa cuenta tiene que ser administradora y abrir WinTaller ella misma." -f $script:SessionUser.Process, $script:SessionUser.Session),
+            "$script:AppName - cuenta distinta", 'OK', 'Warning')
     }
 }
 
@@ -3257,6 +3318,10 @@ $adminColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
 if ($script:IsAdmin) {
     $adminText = 'Administrador'
     $adminColor = [System.Drawing.Color]::FromArgb(0, 120, 0)
+    if ($script:SessionUser -and $script:SessionUser.Mismatch) {
+        $adminText = ('Administrador: {0} (no es la cuenta de la sesión)' -f $script:SessionUser.Process)
+        $adminColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+    }
 }
 $adminLabel = New-Object System.Windows.Forms.ToolStripStatusLabel
 $adminLabel.Text = $adminText
@@ -3786,7 +3851,7 @@ $script:btnOptCancel.add_Click({
     $script:btnOptCancel.Enabled = $false
     $script:statusLabel.Text = 'Cancelando...'
     if ($script:optProcess) {
-        try { & taskkill.exe /PID $script:optProcess.Id /T /F 2>&1 | Out-Null } catch { }
+        try { & "$env:SystemRoot\System32\taskkill.exe" /PID $script:optProcess.Id /T /F 2>&1 | Out-Null } catch { }
     }
 })
 
@@ -3913,7 +3978,7 @@ $script:appCatalog = @(
     (New-AppEntry 'KeePassXC' 'Seguridad' 'KeePassXCTeam.KeePassXC' 'Gestor de contraseñas local.' $false),
     (New-AppEntry 'VeraCrypt' 'Seguridad' 'IDRIX.VeraCrypt' 'Cifrado de discos y carpetas.' $false),
     (New-AppEntry 'Malwarebytes' 'Seguridad' 'Malwarebytes.Malwarebytes' 'Antivirus y antimalware. La versión gratuita analiza y limpia bajo demanda.' $false),
-    (New-AppEntry -Name 'TinyWall' -Category 'Seguridad' -Id 'TinyWall.TinyWall' -Note 'Cortafuegos ligero y gratuito, sin avisos. Se descarga de su web oficial.' -Kind 'msi' -Url 'https://tinywall.pados.hu/files/TinyWall_x86.msi'),
+    (New-AppEntry -Name 'TinyWall' -Category 'Seguridad' -Id 'TinyWall.TinyWall' -Note 'Cortafuegos ligero y gratuito, sin avisos. Se descarga de su web oficial.' -Kind 'msi' -Url 'https://tinywall.pados.hu/files/TinyWall_x86.msi' -Signer 'Pados, O=Open Source Developer, L=Budapest, S=Budapest, C=HU'),
     (New-AppEntry 'VirtualBox' 'Seguridad' 'Oracle.VirtualBox' 'Maquinas virtuales para practicar.' $false),
 
     (New-AppEntry 'AnyDesk' 'Acceso remoto' 'AnyDesk.AnyDesk' 'Acceso remoto a otro equipo.' $false),
@@ -4358,7 +4423,7 @@ function Get-UninstallCommand {
     if ($App.Source -eq 'Appx') {
         $full = ([string]$App.Key) -replace "'", "''"
         return [pscustomobject]@{
-            File   = 'powershell.exe'
+            File   = (Join-Path $PSHOME 'powershell.exe')
             Args   = @('-NoProfile', '-NonInteractive', '-Command', ("Remove-AppxPackage -Package '{0}'" -f $full))
             Hidden = $true
         }
@@ -4377,7 +4442,7 @@ function Get-UninstallCommand {
         if ($m.Success) { $guid = $m.Value }
         if ($guid) {
             return [pscustomobject]@{
-                File   = 'msiexec.exe'
+                File   = (Join-Path $env:SystemRoot 'System32\msiexec.exe')
                 Args   = @('/x', $guid, '/qn', '/norestart')
                 Hidden = $true
             }
@@ -4393,10 +4458,16 @@ function Get-UninstallCommand {
         $exe = $Matches[1]
         $argumentos = $Matches[2]
     } else {
-        $exe = 'cmd.exe'
+        $exe = Join-Path $env:SystemRoot 'System32\cmd.exe'
         $argumentos = '/c ' + $comando
     }
     if (-not $exe) { return $null }
+    # Un ejecutable sin ruta (rundll32.exe, por ejemplo) se busca en System32 y
+    # no en la carpeta actual ni en el PATH.
+    if ($exe -notmatch '[\\/]') {
+        $enSistema = Join-Path $env:SystemRoot ('System32\' + $exe)
+        if (Test-Path -LiteralPath $enSistema) { $exe = $enSistema }
+    }
     return [pscustomobject]@{
         File   = $exe
         Args   = @($argumentos)
@@ -4620,7 +4691,7 @@ function Step-UninstallQueue {
     if (-not $terminado) {
         if ($script:uninstStarted -and ((Get-Date) - $script:uninstStarted).TotalMinutes -gt 45) {
             $colgado = $script:uninstCurrent
-            try { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
             Add-TabLog $script:uninstLog ('{0}: el desinstalador superó 45 minutos y se ha cancelado.' -f $colgado.Tag.Name) 'WARN'
             $script:uninstErrors++
             $script:uninstDone++
@@ -4709,7 +4780,7 @@ function Stop-UninstallQueue {
     $script:uninstQueue.Clear()
     if ($script:uninstProcess) {
         $script:uninstCancelItem = $true
-        try { & taskkill.exe /PID $script:uninstProcess.Id /T /F 2>&1 | Out-Null } catch { }
+        try { & "$env:SystemRoot\System32\taskkill.exe" /PID $script:uninstProcess.Id /T /F 2>&1 | Out-Null } catch { }
         Add-TabLog $script:uninstLog 'Desinstalación detenida por el usuario.' 'WARN'
     } else {
         Finish-UninstallQueue
@@ -5014,7 +5085,7 @@ function New-EquipoState {
 }
 
 function Get-ActivePowerScheme {
-    $salida = (& powercfg.exe /getactivescheme 2>&1 | Out-String)
+    $salida = (& "$env:SystemRoot\System32\powercfg.exe" /getactivescheme 2>&1 | Out-String)
     $guid = ''
     $nombre = ''
     $m = [regex]::Match($salida, ('({0})\s*\(([^)]+)\)' -f $script:GuidPattern))
@@ -5057,22 +5128,22 @@ function Get-PowerPlanState {
 function Set-PowerPlan {
     param([string]$Key)
     $plan = $script:PowerPlans[$Key]
-    & powercfg.exe /setactive $plan.Guid 2>&1 | Out-Null
+    & "$env:SystemRoot\System32\powercfg.exe" /setactive $plan.Guid 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { return }
 
-    $lista = (& powercfg.exe /list 2>&1 | Out-String) -split "`r?`n"
+    $lista = (& "$env:SystemRoot\System32\powercfg.exe" /list 2>&1 | Out-String) -split "`r?`n"
     foreach ($linea in $lista) {
         $m = [regex]::Match($linea, ('({0})\s*\(([^)]+)\)' -f $script:GuidPattern))
         if ($m.Success -and $plan.Names -contains $m.Groups[2].Value.Trim()) {
-            & powercfg.exe /setactive $m.Groups[1].Value 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\powercfg.exe" /setactive $m.Groups[1].Value 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) { return }
         }
     }
 
-    $salida = (& powercfg.exe /duplicatescheme $plan.Guid 2>&1 | Out-String)
+    $salida = (& "$env:SystemRoot\System32\powercfg.exe" /duplicatescheme $plan.Guid 2>&1 | Out-String)
     $m = [regex]::Match($salida, $script:GuidPattern)
     if (-not $m.Success) { throw ('El plan "{0}" no está disponible en este equipo.' -f $plan.Label) }
-    & powercfg.exe /setactive $m.Value 2>&1 | Out-Null
+    & "$env:SystemRoot\System32\powercfg.exe" /setactive $m.Value 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { throw ('No se pudo activar el plan "{0}" (código {1}).' -f $plan.Label, $LASTEXITCODE) }
 }
 
@@ -5099,7 +5170,7 @@ function Get-FastStartupState {
 
 function Get-TrimState {
     if (-not $script:IsAdmin) { return (New-EquipoState 'Sin comprobar (requiere administrador)' $false) }
-    $salida = (& fsutil.exe behavior query DisableDeleteNotify 2>&1 | Out-String)
+    $salida = (& "$env:SystemRoot\System32\fsutil.exe" behavior query DisableDeleteNotify 2>&1 | Out-String)
     $m = [regex]::Match($salida, 'DisableDeleteNotify\s*=\s*(\d)')
     if (-not $m.Success) { return (New-EquipoState 'Desconocido' $false) }
     if ($m.Groups[1].Value -eq '0') { return (New-EquipoState 'Activado' $true) }
@@ -5163,7 +5234,7 @@ $script:equipoActions = @(
         RecLaptop   = $false
         State       = { Get-HibernationState }
         Run         = {
-            & powercfg.exe /hibernate off 2>&1 | Out-Null
+            & "$env:SystemRoot\System32\powercfg.exe" /hibernate off 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) { throw ('powercfg devolvió el código {0}' -f $LASTEXITCODE) }
             Add-TabLog $script:eqLog 'Hibernación desactivada y archivo hiberfil.sys eliminado.' 'OK'
         }
@@ -5263,7 +5334,7 @@ $script:equipoActions = @(
         RecLaptop   = $true
         State       = { Get-TrimState }
         Run         = {
-            $salida = & fsutil.exe behavior set DisableDeleteNotify 0 2>&1
+            $salida = & "$env:SystemRoot\System32\fsutil.exe" behavior set DisableDeleteNotify 0 2>&1
             if ($LASTEXITCODE -ne 0) { throw ($salida -join ' ') }
             Add-TabLog $script:eqLog 'TRIM activado en las unidades SSD.' 'OK'
         }
@@ -6095,12 +6166,12 @@ function Start-MemoryDiagnostic {
 }
 
 function New-BatteryReport {
-    $destino = Join-Path ([Environment]::GetFolderPath('Desktop')) 'informe-bateria.html'
+    $destino = Join-Path ([Environment]::GetFolderPath('Desktop')) ('informe-bateria-{0:yyyyMMdd-HHmm}.html' -f (Get-Date))
     try {
-        & powercfg.exe /batteryreport /output $destino 2>&1 | Out-Null
+        & "$env:SystemRoot\System32\powercfg.exe" /batteryreport /output $destino 2>&1 | Out-Null
         if (-not (Test-Path -LiteralPath $destino)) { throw 'powercfg no ha generado el informe.' }
         Add-TabLog $script:eqLog ('Informe de batería creado: {0}' -f $destino) 'OK'
-        Start-Process -FilePath $destino | Out-Null
+        Open-AsDesktopUser $destino
     } catch {
         Add-TabLog $script:eqLog ('No se pudo crear el informe de batería: {0}' -f $_.Exception.Message) 'ERROR'
     }
@@ -6241,7 +6312,7 @@ function New-EquipoReport {
             [void]$html.AppendLine(('<tr class="{0}"><td class="c">{1}</td><td class="v">{2}</td></tr>' -f $f.N, (ConvertTo-HtmlText $f.C), (ConvertTo-HtmlText $f.V)))
         }
         if ($seccionActual) { [void]$html.AppendLine('</table>') }
-        [void]$html.AppendLine(('<footer>{0} {1} · desarrollado por Sylred Computers. Este informe solo recoge información: no se ha modificado nada en el equipo al generarlo.</footer></body></html>' -f (ConvertTo-HtmlText $script:AppName), $script:AppVersion))
+        [void]$html.AppendLine(('<footer>{0} {1} · desarrollado por Sylred Computers. Este informe solo recoge información: no se ha modificado nada en el equipo al generarlo. Contiene datos de este equipo (hardware, seguridad y cuentas): trátalo como confidencial y compártelo solo con quien lo necesite.</footer></body></html>' -f (ConvertTo-HtmlText $script:AppName), $script:AppVersion))
 
         $carpeta = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'WinTaller\Informes'
         [void](New-Item -ItemType Directory -Path $carpeta -Force -ErrorAction Stop)
@@ -6249,7 +6320,7 @@ function New-EquipoReport {
         $archivo = Join-Path $carpeta ('Informe-{0}-{1:yyyyMMdd-HHmm}.html' -f $nombreSeguro, $fecha)
         [System.IO.File]::WriteAllText($archivo, $html.ToString(), (New-Object System.Text.UTF8Encoding($true)))
         Add-TabLog $script:eqLog ('Informe del equipo creado: {0} ({1} correctos, {2} avisos, {3} problemas)' -f $archivo, $nOk, $nWarn, $nBad) 'OK'
-        if (-not $UiSmokeTest) { Start-Process -FilePath $archivo | Out-Null }
+        if (-not $UiSmokeTest) { Open-AsDesktopUser $archivo }
         return $archivo
     } catch {
         Add-TabLog $script:eqLog ('No se pudo crear el informe: {0}' -f $_.Exception.Message) 'ERROR'
@@ -6818,7 +6889,7 @@ $btnProgramsNone.add_Click({
 
 $btnProgramsStore.add_Click({
     try {
-        Start-Process 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1' | Out-Null
+        Open-AsDesktopUser 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1'
     } catch {
         [void][System.Windows.Forms.MessageBox]::Show(
             "No se pudo abrir Microsoft Store.`n`nAbre la Store y busca 'Instalador de aplicaciones' (App Installer).",
@@ -7260,7 +7331,7 @@ function Start-DriverChild {
     }
 
     try {
-        $script:drvProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentos -PassThru -WindowStyle Hidden
+        $script:drvProcess = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $argumentos -PassThru -WindowStyle Hidden
         $script:drvProcess.EnableRaisingEvents = $true
         $script:drvStarted = Get-Date
         $script:drvTimer.Start()
@@ -7464,7 +7535,7 @@ function Step-DriverQueue {
         $limite = 90
         if ($script:drvSearching) { $limite = 10 }
         if ($script:drvStarted -and ((Get-Date) - $script:drvStarted).TotalMinutes -gt $limite) {
-            try { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
             try { $proc.Dispose() } catch { }
             $script:drvProcess = $null
             $script:drvTimer.Stop()
@@ -7536,7 +7607,7 @@ function Stop-DriverQueue {
     $eraBusqueda = [bool]$script:drvSearching
     if ($script:drvProcess) {
         try {
-            if (-not $script:drvProcess.HasExited) { & taskkill.exe /PID $script:drvProcess.Id /T /F 2>&1 | Out-Null }
+            if (-not $script:drvProcess.HasExited) { & "$env:SystemRoot\System32\taskkill.exe" /PID $script:drvProcess.Id /T /F 2>&1 | Out-Null }
         } catch {
             try { $script:drvProcess.Kill() } catch { }
         }
@@ -7574,7 +7645,7 @@ function Backup-DriverPackages {
     [System.Windows.Forms.Application]::DoEvents()
     try {
         [void](New-Item -ItemType Directory -Path $destino -Force -ErrorAction Stop)
-        $salida = & pnputil.exe /export-driver * $destino 2>&1 | Out-String
+        $salida = & "$env:SystemRoot\System32\pnputil.exe" /export-driver * $destino 2>&1 | Out-String
         $codigo = $LASTEXITCODE
         $archivos = @(Get-ChildItem -LiteralPath $destino -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue)
         if ($codigo -eq 0) {
@@ -7583,7 +7654,7 @@ function Backup-DriverPackages {
             [void][System.Windows.Forms.MessageBox]::Show(
                 ("Copia de seguridad creada.`n`nPaquetes de driver: {0}`nCarpeta:`n{1}`n`nPara recuperarlos, usa 'Instalar .inf...' o el Administrador de dispositivos." -f $archivos.Count, $destino),
                 "$script:AppName - copia de drivers", 'OK', 'Information')
-            try { Start-Process explorer.exe $destino } catch { }
+            try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"{0}"' -f $destino) } catch { }
         } else {
             throw ('pnputil devolvió el código {0}: {1}' -f $codigo, $salida.Trim())
         }
@@ -7616,7 +7687,7 @@ function Install-DriverFromInf {
     $script:form.UseWaitCursor = $true
     [System.Windows.Forms.Application]::DoEvents()
     try {
-        $salida = & pnputil.exe /add-driver $archivo /install 2>&1 | Out-String
+        $salida = & "$env:SystemRoot\System32\pnputil.exe" /add-driver $archivo /install 2>&1 | Out-String
         $codigo = $LASTEXITCODE
         if ($codigo -eq 0 -or $codigo -eq 3010) {
             Add-TabLog $script:drvLog 'Driver instalado correctamente.' 'OK'
@@ -7688,7 +7759,7 @@ function Open-ManufacturerSupport {
     Add-TabLog $script:drvLog ('Abriendo el soporte del fabricante: {0}' -f $url) 'STEP'
     if ($modelo) { Add-TabLog $script:drvLog ('Modelo copiado al portapapeles: {0}' -f $modelo) }
     try {
-        Start-Process $url | Out-Null
+        Open-AsDesktopUser $url
     } catch {
         Add-TabLog $script:drvLog ('No se pudo abrir el navegador: {0}' -f $_.Exception.Message) 'ERROR'
     }
@@ -7957,7 +8028,7 @@ try {
         Write-Evento @{ t = 'inicio'; modo = 'image'; destino = ($letraDestino + '\'); libre = (Get-Tamano $libre); necesario = (Get-Tamano ($usado * 1.1)) }
         $reloj = [System.Diagnostics.Stopwatch]::StartNew()
         $codigo = -1
-        & wbadmin.exe start backup ("-backupTarget:{0}" -f $letraDestino) ("-include:{0}" -f $sistema) -allCritical -quiet 2>&1 | ForEach-Object {
+        & "$env:SystemRoot\System32\wbadmin.exe" start backup ("-backupTarget:{0}" -f $letraDestino) ("-include:{0}" -f $sistema) -allCritical -quiet 2>&1 | ForEach-Object {
             $texto = ([string]$_).Trim()
             if ($texto) { Write-Evento @{ t = 'linea'; texto = $texto } }
         }
@@ -7970,7 +8041,7 @@ try {
         return
     }
 
-    if (-not (Get-Command robocopy.exe -ErrorAction SilentlyContinue)) {
+    if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\robocopy.exe'))) {
         throw 'robocopy no esta disponible en este equipo'
     }
 
@@ -8045,7 +8116,7 @@ try {
                 $p.Source, $p.Dest, '/E', '/R:2', '/W:2', '/XJ', '/V',
                 '/NP', '/NDL', '/NJS', '/NJH', '/COPY:DAT', '/DCOPY:T'
             )
-            & robocopy.exe @argumentos 2>&1 | ForEach-Object {
+            & "$env:SystemRoot\System32\robocopy.exe" @argumentos 2>&1 | ForEach-Object {
                 $linea = [string]$_
                 if (-not $linea.Trim()) { return }
                 try { if ($escritor) { $escritor.WriteLine($linea) } } catch { }
@@ -8290,7 +8361,7 @@ function Start-BackupChild {
     )
 
     try {
-        $script:bkProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentos -PassThru -WindowStyle Hidden
+        $script:bkProcess = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $argumentos -PassThru -WindowStyle Hidden
         $script:bkProcess.EnableRaisingEvents = $true
         $script:bkStarted = Get-Date
         $script:bkTimer.Start()
@@ -8326,7 +8397,7 @@ function Start-BackupJob {
     }
 
     if ($Mode -eq 'image') {
-        if (-not (Get-Command wbadmin.exe -ErrorAction SilentlyContinue)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\wbadmin.exe'))) {
             [void][System.Windows.Forms.MessageBox]::Show(
                 "Este Windows no incluye wbadmin, la herramienta de imagen del sistema.`n`nPuedes usar la copia de carpetas.",
                 "$script:AppName - copias", 'OK', 'Warning')
@@ -8611,7 +8682,7 @@ function Step-BackupJob {
 
     if (-not $terminado) {
         if ($script:bkStarted -and ((Get-Date) - $script:bkStarted).TotalHours -gt 6) {
-            try { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
+            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
             try { $proc.Dispose() } catch { }
             $script:bkProcess = $null
             $script:bkTimer.Stop()
@@ -8644,7 +8715,7 @@ function Stop-BackupJob {
     if ($script:bkProcess) {
         try {
             if (-not $script:bkProcess.HasExited) {
-                & taskkill.exe /PID $script:bkProcess.Id /T /F 2>&1 | Out-Null
+                & "$env:SystemRoot\System32\taskkill.exe" /PID $script:bkProcess.Id /T /F 2>&1 | Out-Null
             }
         } catch {
             try { $script:bkProcess.Kill() } catch { }
@@ -8679,7 +8750,7 @@ function Open-BackupDestination {
         } catch { }
     }
     if ($dest -and (Test-Path -LiteralPath $dest)) {
-        try { Start-Process explorer.exe $dest | Out-Null } catch { }
+        try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"{0}"' -f $dest) | Out-Null } catch { }
     } else {
         [void][System.Windows.Forms.MessageBox]::Show(
             'Todavía no hay una carpeta de destino que abrir.', "$script:AppName - copias", 'OK', 'Information')
@@ -10201,7 +10272,7 @@ function Stop-SecurityJob {
             } catch { }
         }
         try {
-            if (-not $proc.HasExited) { & taskkill.exe /PID $proc.Id /T /F 2>&1 | Out-Null }
+            if (-not $proc.HasExited) { & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null }
         } catch { }
         try { $proc.Dispose() } catch { }
         if (-not $Silent) { Add-TabLog $script:secLog ('{0} detenido por el usuario.' -f $script:secTarget) 'WARN' }
@@ -10615,7 +10686,7 @@ function Set-SelectedStartupEnabled {
 function Open-StartupLocation {
     $sel = @(Get-SelectedStartupEntries)
     if ($sel.Count -ne 1 -or -not $sel[0].Executable) { return }
-    try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $sel[0].Executable) | Out-Null } catch { }
+    try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('/select,"{0}"' -f $sel[0].Executable) | Out-Null } catch { }
 }
 
 function Start-StartupScan {
@@ -10636,7 +10707,7 @@ $script:btnIniEnable.add_Click({ Set-SelectedStartupEnabled -Enabled $true })
 $script:btnIniOpen.add_Click({ Open-StartupLocation })
 $script:btnIniScan.add_Click({ Start-StartupScan })
 $btnIniRefresh.add_Click({ Update-StartupTab })
-$btnIniTaskMgr.add_Click({ try { Start-Process -FilePath 'taskmgr.exe' -ArgumentList '/0 /startup' | Out-Null } catch { } })
+$btnIniTaskMgr.add_Click({ try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskmgr.exe') -ArgumentList '/0 /startup' | Out-Null } catch { } })
 $btnIniSave.add_Click({ Save-LogBox $script:iniLog 'registro_inicio' })
 $btnIniClear.add_Click({ $script:iniLog.Clear() })
 
@@ -11467,7 +11538,7 @@ $btnPtFirewall.add_Click({ try { Start-Process -FilePath (Join-Path $env:SystemR
 $script:btnPtOpen.add_Click({
     $e = Get-SelectedPort
     if (-not $e -or -not $e.Path) { return }
-    try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $e.Path) | Out-Null } catch { }
+    try { Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('/select,"{0}"' -f $e.Path) | Out-Null } catch { }
 })
 $btnPtSave.add_Click({ Save-LogBox $script:ptLog 'registro_puertos' })
 $btnPtClear.add_Click({ $script:ptLog.Clear() })
@@ -12547,6 +12618,11 @@ if ($UiSmokeTest) {
     Write-Host ('Tamaño del panel de tareas: {0}x{1}' -f $grpTasks.Width, $grpTasks.Height)
     Write-Host ('Tamaño del registro: {0}x{1}' -f $script:logBox.Width, $script:logBox.Height)
     Write-Host ('Etiqueta de info: {0}' -f $script:lblSystemInfo.Text)
+    if ($script:SessionUser) {
+        Write-Host ('Usuario del programa: {0} | usuario de la sesión: {1} | distinto: {2}' -f $script:SessionUser.Process, $script:SessionUser.Session, $script:SessionUser.Mismatch)
+    } else {
+        Write-Host 'Usuario de la sesión: sin comprobar (sin administrador)'
+    }
 
     # Prueba del filtro de búsqueda
     $script:txtSearch.Text = 'Windows'
