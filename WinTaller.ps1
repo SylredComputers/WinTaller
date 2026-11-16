@@ -42,7 +42,7 @@ try {
 } catch { }
 
 $script:AppName    = 'WinTaller'
-$script:AppVersion = '2.1.1'
+$script:AppVersion = '2.1.2'
 $script:IsAdmin    = $false
 $script:busy       = $false
 $script:optCancel  = $false
@@ -2206,7 +2206,7 @@ $script:tasks = @(
                 $puntosAntes = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber)
                 if ($puntosAntes.Count -gt 0) { $antes = [int]$puntosAntes[-1].SequenceNumber }
             } catch { }
-            try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue } catch { }
+            try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop } catch { Write-Diag ('Punto de restauración: Enable-ComputerRestore: ' + $_.Exception.Message) }
             # Se quita temporalmente el límite de un punto cada 24 h y después se
             # deja el valor como estaba (antes se quedaba a 0 para siempre).
             $frecuenciaAnterior = $null
@@ -2240,11 +2240,13 @@ $script:tasks = @(
                 if ($frecuenciaCambiada) {
                     try {
                         if ($null -eq $frecuenciaAnterior) {
-                            Remove-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction SilentlyContinue
+                            Remove-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction Stop
                         } else {
-                            Set-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value ([int]$frecuenciaAnterior) -ErrorAction SilentlyContinue
+                            Set-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value ([int]$frecuenciaAnterior) -ErrorAction Stop
                         }
-                    } catch { }
+                    } catch {
+                        Write-Log ('No se pudo devolver a su valor el límite de un punto de restauración cada 24 h: {0}' -f $_.Exception.Message) 'WARN'
+                    }
                 }
             }
         }
@@ -2327,7 +2329,7 @@ $script:tasks = @(
                         try {
                             Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
                             $disabled++
-                        } catch { }
+                        } catch { Write-Diag ('Fallo ignorado en tarea / Disable-ScheduledTask: ' + $_.Exception.Message) }
                     }
                 } catch { }
             }
@@ -2485,7 +2487,7 @@ $script:tasks = @(
                 if ($suma) { $liberado = [math]::Round($suma / 1MB, 1) }
             } catch { }
             foreach ($svc in @('wuauserv','BITS')) {
-                try { Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue } catch { }
+                try { Stop-Service -Name $svc -Force -ErrorAction Stop } catch { Write-Diag ('Cache de Windows Update: no se pudo detener {0}: {1}' -f $svc, $_.Exception.Message) }
             }
             Start-Sleep -Seconds 2
             try {
@@ -2494,7 +2496,9 @@ $script:tasks = @(
                 }
             } catch { }
             foreach ($svc in @('wuauserv','BITS')) {
-                try { Start-Service -Name $svc -ErrorAction SilentlyContinue } catch { }
+                try { Start-Service -Name $svc -ErrorAction Stop } catch {
+                    Write-Log ('No se pudo volver a arrancar el servicio {0}: {1}. Windows lo arrancará al reiniciar o cuando lo necesite.' -f $svc, $_.Exception.Message) 'WARN'
+                }
             }
             Write-Log ('Cache de Windows Update vaciada. Espacio liberado aproximado: {0} MB.' -f $liberado) 'OK'
         }
@@ -2524,7 +2528,9 @@ $script:tasks = @(
                             try { Remove-FileSystemInfoSafe -Info $_ } catch { }
                         }
                     }
-                    Start-Service -Name 'DoSvc' -ErrorAction SilentlyContinue
+                    try { Start-Service -Name 'DoSvc' -ErrorAction Stop } catch {
+                        Write-Log ('No se pudo volver a arrancar el servicio DoSvc: {0}. Windows lo arrancará cuando lo necesite.' -f $_.Exception.Message) 'WARN'
+                    }
                     Write-Log 'Cache de Optimización de entrega limpiada manualmente.' 'OK'
                 } catch {
                     Write-Log ('No se pudo limpiar la cache de Optimización de entrega: {0}' -f $_.Exception.Message) 'WARN'
@@ -2653,10 +2659,16 @@ $script:tasks = @(
         Confirm     = 'Se restablecerá la configuración de red y habrá que REINICIAR. Si tienes VPN o reglas de red especiales, se perderan. Continuar?'
         Run         = {
             Write-Log 'Restableciendo Winsock...'
-            try { & "$env:SystemRoot\System32\netsh.exe" winsock reset 2>&1 | Out-Null } catch { }
+            try {
+                $salidaRed = & "$env:SystemRoot\System32\netsh.exe" winsock reset 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { Write-Log ('netsh winsock reset devolvió el código {0}: {1}' -f $LASTEXITCODE, $salidaRed.Trim()) 'WARN' }
+            } catch { Write-Log ('No se pudo ejecutar netsh winsock reset: {0}' -f $_.Exception.Message) 'WARN' }
             Write-Log 'Restableciendo la pila IP...'
-            try { & "$env:SystemRoot\System32\netsh.exe" int ip reset 2>&1 | Out-Null } catch { }
-            try { & "$env:SystemRoot\System32\ipconfig.exe" /flushdns 2>&1 | Out-Null } catch { }
+            try {
+                $salidaRed = & "$env:SystemRoot\System32\netsh.exe" int ip reset 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { Write-Log ('netsh int ip reset devolvió el código {0}: {1}' -f $LASTEXITCODE, $salidaRed.Trim()) 'WARN' }
+            } catch { Write-Log ('No se pudo ejecutar netsh int ip reset: {0}' -f $_.Exception.Message) 'WARN' }
+            try { & "$env:SystemRoot\System32\ipconfig.exe" /flushdns 2>&1 | Out-Null } catch { Write-Diag ('Fallo ignorado en tarea / ipconfig.exe: ' + $_.Exception.Message) }
             Write-Log 'Red restablecida. Reinicia el equipo para terminar.' 'OK'
         }
     }
@@ -2765,7 +2777,7 @@ function Save-OptimizationSnapshot {
             try {
                 & "$env:SystemRoot\System32\reg.exe" export $rutaReg $destino /y 2>&1 | Out-Null
                 if (Test-Path -LiteralPath $destino) { $archivosReg += $destino }
-            } catch { }
+            } catch { Write-Diag ('Fallo ignorado en Save-OptimizationSnapshot / reg.exe: ' + $_.Exception.Message) }
         }
 
         $servicios = @()
@@ -2784,7 +2796,7 @@ function Save-OptimizationSnapshot {
             $salida = (& "$env:SystemRoot\System32\powercfg.exe" /getactivescheme 2>&1 | Out-String)
             $m = [regex]::Match($salida, '\{[0-9a-fA-F-]{36}\}')
             if ($m.Success) { $esquema = $m.Value }
-        } catch { }
+        } catch { Write-Diag ('Fallo ignorado en Save-OptimizationSnapshot / powercfg.exe: ' + $_.Exception.Message) }
 
         $datos = [pscustomobject]@{
             Created     = (Get-Date).ToString('s')
@@ -2865,7 +2877,9 @@ function Revert-Optimization {
                 $salidaSc = & "$env:SystemRoot\System32\sc.exe" config $nombreSvc start= $valorSc 2>&1 | Out-String
                 if ($LASTEXITCODE -ne 0) { throw $salidaSc.Trim() }
                 if ([string]$servicio.State -eq 'Running' -and [string]$actual.State -ne 'Running' -and $modo -ne 'Disabled') {
-                    Start-Service -Name $nombreSvc -ErrorAction SilentlyContinue
+                    try { Start-Service -Name $nombreSvc -ErrorAction Stop } catch {
+                        Write-Log ('Servicio {0}: tipo de inicio restaurado, pero no se pudo arrancar ({1}).' -f $nombreSvc, $_.Exception.Message) 'WARN'
+                    }
                 }
                 Write-Log ('Servicio {0}: tipo de inicio restaurado a {1}.' -f $nombreSvc, $valorSc)
                 $cambios++
@@ -2892,12 +2906,15 @@ function Revert-Optimization {
             if ($estadoTareas[$claveTarea] -eq $deshabilitadaAntes) { continue }
             try {
                 if ($deshabilitadaAntes) {
-                    Disable-ScheduledTask -TaskName ([string]$tarea.TaskName) -TaskPath ([string]$tarea.TaskPath) -ErrorAction SilentlyContinue | Out-Null
+                    Disable-ScheduledTask -TaskName ([string]$tarea.TaskName) -TaskPath ([string]$tarea.TaskPath) -ErrorAction Stop | Out-Null
                 } else {
-                    Enable-ScheduledTask -TaskName ([string]$tarea.TaskName) -TaskPath ([string]$tarea.TaskPath) -ErrorAction SilentlyContinue | Out-Null
+                    Enable-ScheduledTask -TaskName ([string]$tarea.TaskName) -TaskPath ([string]$tarea.TaskPath) -ErrorAction Stop | Out-Null
                 }
                 $tareasOk++
-            } catch { }
+            } catch {
+                Write-Log ('No se pudo restaurar la tarea {0}: {1}' -f $claveTarea, $_.Exception.Message) 'WARN'
+                $errores++
+            }
         }
         Write-Log ('Tareas programadas revisadas: {0}' -f $tareasOk) 'OK'
 
@@ -4652,12 +4669,22 @@ function Start-NextUninstall {
     # permisos de administrador. Si la herramienta está elevada, su comando se
     # ejecutaría como administrador: se muestra completo, se pide confirmación
     # y nunca se lanza oculto.
-    if ($app.Hive -eq 'HKCU' -and $script:IsAdmin) {
+    # Lo mismo cuando el comando no es un ejecutable claro y hay que pasarlo a
+    # cmd.exe /c: se enseña tal cual antes de ejecutarlo.
+    $porCmd = ([System.IO.Path]::GetFileName([string]$cmd.File) -ieq 'cmd.exe')
+    if (($app.Hive -eq 'HKCU' -or $porCmd) -and $script:IsAdmin) {
         $cmd.Hidden = $false
         $textoCmd = ('{0} {1}' -f $cmd.File, (@($cmd.Args) -join ' ')).Trim()
-        $aviso = ("'{0}' está registrado solo para tu usuario (HKCU) y su desinstalador se ejecutaría con permisos de administrador.`n`nComando:`n{1}`n`nEjecútalo solo si reconoces el programa y la ruta. ¿Continuar?" -f $app.Name, $textoCmd)
+        if ($app.Hive -eq 'HKCU') {
+            $aviso = ("'{0}' está registrado solo para tu usuario (HKCU) y su desinstalador se ejecutaría con permisos de administrador.`n`nComando:`n{1}`n`nEjecútalo solo si reconoces el programa y la ruta. ¿Continuar?" -f $app.Name, $textoCmd)
+            $motivo = 'entrada de HKCU'
+        } else {
+            $aviso = ("El desinstalador de '{0}' no indica un programa concreto y se ejecutará con cmd.exe con permisos de administrador.`n`nComando:`n{1}`n`nEjecútalo solo si reconoces el programa y la ruta. ¿Continuar?" -f $app.Name, $textoCmd)
+            $motivo = 'comando ejecutado con cmd.exe'
+        }
+        Write-Diag ('Desinstalar {0}: se pide confirmación ({1}): {2}' -f $app.Name, $motivo, $textoCmd)
         if ([System.Windows.Forms.MessageBox]::Show($aviso, "$script:AppName - desinstalar", 'YesNo', 'Warning') -ne 'Yes') {
-            Add-TabLog $script:uninstLog ('{0}: omitido por el usuario (entrada de HKCU).' -f $app.Name) 'WARN'
+            Add-TabLog $script:uninstLog ('{0}: omitido por el usuario ({1}).' -f $app.Name, $motivo) 'WARN'
             $script:uninstErrors++
             $script:uninstDone++
             $script:uninstCurrent = $null
@@ -8222,6 +8249,24 @@ function Get-BackupDiskNumber {
     return -1
 }
 
+# Indica si la unidad de destino de una copia está cifrada con BitLocker.
+# Devuelve 'Cifrado', 'Sin cifrar' o '' si no se puede saber (sin permisos de
+# administrador, carpeta de red o Windows sin BitLocker).
+function Get-DestinationEncryption {
+    param([string]$Path)
+    try {
+        $raiz = [System.IO.Path]::GetPathRoot($Path)
+        if (-not $raiz -or $raiz.StartsWith('\\')) { return '' }
+        if (-not $script:IsAdmin -or -not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) { return '' }
+        $volumen = Get-BitLockerVolume -MountPoint ($raiz.TrimEnd('\')) -ErrorAction Stop
+        if ([string]$volumen.ProtectionStatus -eq 'On' -or [string]$volumen.VolumeStatus -eq 'FullyEncrypted' -or [string]$volumen.VolumeStatus -eq 'EncryptionInProgress') { return 'Cifrado' }
+        return 'Sin cifrar'
+    } catch {
+        Write-Diag ('Copias: no se pudo comprobar el cifrado de {0}: {1}' -f $Path, $_.Exception.Message)
+        return ''
+    }
+}
+
 function Update-BackupDestinationInfo {
     if (-not $script:bkDest) { return }
     $destino = $script:bkDest.Text.Trim()
@@ -8503,6 +8548,11 @@ function Start-BackupJob {
                 $lineas += 'AVISO: el destino esta en el mismo disco físico que el origen. Si el disco falla, perderas también la copia.'
             }
         }
+        $cifrado = Get-DestinationEncryption $Destination
+        if ($cifrado -eq 'Sin cifrar') {
+            $lineas += ''
+            $lineas += 'AVISO: la unidad de destino no está cifrada con BitLocker. Quien tenga ese disco podrá leer la copia. Si contiene datos personales o de clientes, usa un disco cifrado (BitLocker To Go en los USB).'
+        }
         $lineas += ''
         $lineas += 'Continuar?'
         $respuesta = [System.Windows.Forms.MessageBox]::Show(
@@ -8529,6 +8579,7 @@ function Start-BackupJob {
         $script:statusLabel.Text = 'Creando imagen del sistema...'
     } else {
         Add-TabLog $script:bkLog ('=== Copia de {0} carpetas -> {1} ===' -f $Sources.Count, $Destination) 'STEP'
+        if (-not $Testing -and $cifrado -eq 'Sin cifrar') { Add-TabLog $script:bkLog 'La unidad de destino no está cifrada: guarda el disco en un lugar seguro.' 'WARN' }
         Add-TabLog $script:bkLog 'Contando archivos y comprobando el espacio libre...'
         $script:statusLabel.Text = 'Preparando la copia...'
     }
@@ -11927,7 +11978,7 @@ function Set-PrivacyComponent {
                     if ([string]$svc.StartMode -eq 'Auto') { if ([bool]$svc.DelayedAutoStart) { $modo = 'DelayedAuto' } else { $modo = 'Auto' } }
                     $Saved[$nombre] = $modo
                 }
-                try { Stop-Service -Name $nombre -Force -ErrorAction Stop } catch { }
+                try { Stop-Service -Name $nombre -Force -ErrorAction Stop } catch { Write-Diag ('Fallo ignorado en Set-PrivacyComponent / Stop-Service: ' + $_.Exception.Message) }
                 Set-Service -Name $nombre -StartupType Disabled -ErrorAction Stop
             } else {
                 $modo = [string]$Component.Default
@@ -11936,7 +11987,7 @@ function Set-PrivacyComponent {
                 $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
                 $salida = & $sc config $nombre start= $valorSc 2>&1 | Out-String
                 if ($LASTEXITCODE -ne 0) { throw $salida.Trim() }
-                if ($valorSc -ne 'demand') { try { Start-Service -Name $nombre -ErrorAction Stop } catch { } }
+                if ($valorSc -ne 'demand') { try { Start-Service -Name $nombre -ErrorAction Stop } catch { Write-Diag ('Fallo ignorado en Set-PrivacyComponent / Start-Service: ' + $_.Exception.Message) } }
                 [void]$Saved.Remove($nombre)
             }
         }

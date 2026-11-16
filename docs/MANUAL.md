@@ -479,6 +479,13 @@ La columna **Valoración** combina el riesgo del puerto con su alcance: *Revisar
 
 ---
 
+### Protecciones añadidas en la versión 2.1.2
+
+- **Copias sin cifrar:** si la unidad de destino no tiene BitLocker, la confirmación de la copia lo avisa (con permisos de administrador; en carpetas de red no se puede comprobar).
+- **Fallos que antes pasaban inadvertidos:** devolver a su valor el límite de un punto de restauración cada 24 h, volver a arrancar Windows Update y la Optimización de entrega tras limpiar sus cachés, restaurar tareas programadas al revertir y restablecer la red avisan en el registro si fallan. El resto de fallos de cambios del sistema quedan anotados en `diagnostico.log`.
+- **Desinstaladores por `cmd.exe`:** cuando el comando de desinstalación no indica un programa concreto, se muestra completo y se pide confirmación antes de ejecutarlo como administrador.
+- **Revisión automática y aviso de fallos:** el repositorio analiza cada cambio en GitHub y tiene una política de seguridad (`SECURITY.md`) para avisar de vulnerabilidades en privado.
+
 ### Protecciones añadidas en la versión 2.1.1
 
 - **Navegador sin permisos de administrador:** las páginas web (soporte del fabricante, Microsoft Store) y los informes se abren a través del Explorador, con la sesión normal del usuario, aunque WinTaller esté elevado.

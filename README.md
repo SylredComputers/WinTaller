@@ -79,6 +79,9 @@ Todas las acciones piden confirmación y quedan anotadas en un registro que se p
 - No descarga ni ejecuta nada de servidores propios: los programas vienen de **winget** y los drivers de **Windows Update**. El único instalador directo (TinyWall) se descarga por HTTPS desde su web oficial y **solo se instala si su firma digital es válida**.
 - Las operaciones con permisos de administrador usan una carpeta protegida (`C:\ProgramData\WinTaller`) a la que solo acceden SYSTEM y Administradores.
 - Las limpiezas no siguen enlaces de carpeta (junctions), para no borrar nada fuera de la carpeta que se limpia.
+- Las páginas web y los informes se abren con la sesión normal del usuario, y las herramientas de Windows se ejecutan siempre desde `System32`.
+- Cada cambio se revisa automáticamente en GitHub (sintaxis, PSScriptAnalyzer y autocomprobación).
+- ¿Has encontrado un fallo de seguridad? No lo publiques: sigue los pasos de [SECURITY.md](SECURITY.md).
 
 ---
 

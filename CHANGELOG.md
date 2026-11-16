@@ -1,5 +1,18 @@
 # Historial de cambios
 
+## v2.1.2
+
+Segunda tanda de correcciones de la auditoría de seguridad.
+
+**Seguridad**
+- Copias: aviso cuando la unidad de destino no está cifrada con BitLocker.
+- Los desinstaladores que se ejecutan mediante `cmd.exe /c` muestran el comando y piden confirmación con permisos de administrador.
+- Fallos que antes se ignoraban al cambiar el sistema ahora se avisan o se anotan: límite de puntos de restauración, arranque de Windows Update y de la Optimización de entrega, tareas programadas al revertir, restablecimiento de red y cambios de la pestaña Privacidad.
+
+**Proyecto**
+- `SECURITY.md`: cómo avisar de una vulnerabilidad en privado y cómo se publica cada versión.
+- Análisis automático en GitHub Actions en cada cambio: sintaxis en PowerShell 5.1, PSScriptAnalyzer y autocomprobación `-SelfTest`.
+
 ## v2.1.1
 
 Correcciones de la auditoría de seguridad (ISO/IEC 27001 / 27002).
