@@ -16,7 +16,7 @@ jobs:
   analisis:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Sintaxis (Windows PowerShell 5.1)
         shell: powershell
