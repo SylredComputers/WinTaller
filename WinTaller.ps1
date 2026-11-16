@@ -8,6 +8,7 @@
       * Detener y deshabilitar servicios de forma permanente.
       * Reactivar servicios (tipo de inicio Manual).
       * Aplicar tareas habituales de optimización y limpieza.
+      * Escanear los puertos abiertos y la telemetría del equipo.
 
     Uso:
       powershell -NoProfile -ExecutionPolicy Bypass -STA -File .\WinTaller.ps1
@@ -41,7 +42,7 @@ try {
 } catch { }
 
 $script:AppName    = 'WinTaller'
-$script:AppVersion = '2.0.0'
+$script:AppVersion = '2.1.0'
 $script:IsAdmin    = $false
 $script:busy       = $false
 $script:optCancel  = $false
@@ -1307,6 +1308,14 @@ function Set-RegValue {
         New-Item -Path $Path -Force -ErrorAction Stop | Out-Null
     }
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+}
+
+# Borra un valor del registro si existe (vuelve al comportamiento por defecto).
+function Remove-RegValue {
+    param([string]$Path, [string]$Name)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    if ($null -eq (Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction SilentlyContinue)) { return }
+    Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop
 }
 
 function Update-ExplorerSettings {
@@ -3186,7 +3195,7 @@ $rootLayout.Controls.Add($tabs, 0, 0)
 #   Sistema       -> Servicios, Inicio, Drivers
 #   Optimización  -> Limpieza y mantenimiento, Rendimiento
 #   Programas     -> Instalar, Desinstalar
-#   Protección    -> Seguridad, Copias
+#   Protección    -> Seguridad, Puertos, Privacidad, Copias
 function New-MainTab {
     param([string]$Text)
     $pagina = New-Object System.Windows.Forms.TabPage
@@ -4985,6 +4994,11 @@ $uninstTip.SetToolTip($script:btnUninstDanger, 'Explica que tipos de programas e
 $script:GuidPattern = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 $script:ReportBrand = 'WinTaller'
 
+# Compilación de Windows (22000 o superior = Windows 11). Algunos ajustes solo
+# existen a partir de una compilación concreta.
+$script:WinBuild = 0
+try { $script:WinBuild = [int][Environment]::OSVersion.Version.Build } catch { }
+
 function Get-RegValueSafe {
     param([string]$Path, [string]$Name)
     try {
@@ -5291,6 +5305,193 @@ $script:equipoActions = @(
             Set-RegValue 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR' 'AllowGameDVR' 0
             Add-TabLog $script:eqLog 'Game DVR desactivado.' 'OK'
         }
+    },
+    # --- Windows más ágil: opciones útiles que Windows trae desactivadas -------
+    # Estos ajustes tienen además un bloque Undo: el botón "Deshacer" devuelve
+    # el valor que trae Windows de fábrica.
+    [pscustomobject]@{
+        Name        = 'Activar "Finalizar tarea" en la barra de tareas'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'Añade "Finalizar tarea" al menú del botón derecho de cada programa en la barra de tareas. Permite cerrar un programa colgado sin abrir el Administrador de tareas. Windows 11 lo trae desactivado (Configuración > Sistema > Para desarrolladores). Se aplica al momento.'
+        Target      = 'Win11'
+        MinBuild    = 22631
+        RecDesktop  = $true
+        RecLaptop   = $true
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' 'TaskbarEndTask'
+            if ($v -eq 1) { New-EquipoState 'Activado' $true } else { New-EquipoState 'Desactivado' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' 'TaskbarEndTask' 1
+            Add-TabLog $script:eqLog '"Finalizar tarea" activado en el botón derecho de la barra de tareas.' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' 'TaskbarEndTask' 0
+            Add-TabLog $script:eqLog '"Finalizar tarea" desactivado (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Menú contextual clásico al hacer clic derecho'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'El botón derecho vuelve a mostrar el menú completo de siempre, sin tener que pulsar "Mostrar más opciones". Ahorra un clic cada vez. Solo afecta a tu usuario. Se aplica al cerrar sesión o al reiniciar el Explorador de Windows.'
+        Target      = 'Win11'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = [Microsoft.Win32.Registry]::GetValue('HKEY_CURRENT_USER\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32', '', $null)
+            if ($null -ne $v -and [string]$v -eq '') { New-EquipoState 'Menú clásico' $true } else { New-EquipoState 'Menú de Windows 11' $false }
+        }
+        Run         = {
+            [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32', '', '', [Microsoft.Win32.RegistryValueKind]::String)
+            Add-TabLog $script:eqLog 'Menú contextual clásico activado. Cierra sesión o reinicia el Explorador para verlo.' 'OK'
+        }
+        Undo        = {
+            $clave = 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}'
+            if (Test-Path -LiteralPath $clave) { Remove-Item -LiteralPath $clave -Recurse -Force -ErrorAction Stop }
+            Add-TabLog $script:eqLog 'Menú contextual de Windows 11 restaurado. Cierra sesión o reinicia el Explorador para verlo.' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Mostrar las extensiones de los archivos'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'El Explorador muestra el nombre completo (factura.pdf, foto.jpg). Además de ahorrar tiempo es una medida de seguridad: deja a la vista los archivos del tipo "factura.pdf.exe". Windows las oculta por defecto.'
+        Target      = 'Todos'
+        RecDesktop  = $true
+        RecLaptop   = $true
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'HideFileExt'
+            if ($v -eq 0) { New-EquipoState 'Visibles' $true } else { New-EquipoState 'Ocultas' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'HideFileExt' 0
+            Update-ExplorerSettings
+            Add-TabLog $script:eqLog 'Extensiones de archivo visibles. Si no se ven aún, pulsa F5 en el Explorador.' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'HideFileExt' 1
+            Update-ExplorerSettings
+            Add-TabLog $script:eqLog 'Extensiones de archivo ocultas (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Abrir el Explorador en "Este equipo"'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'El Explorador de archivos se abre directamente en "Este equipo" (discos y unidades) en lugar de en Inicio / Acceso rápido, que tarda más en cargar porque calcula los archivos recientes.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'LaunchTo'
+            if ($v -eq 1) { New-EquipoState 'Este equipo' $true } else { New-EquipoState 'Inicio / Acceso rápido' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'LaunchTo' 1
+            Add-TabLog $script:eqLog 'El Explorador se abrirá en "Este equipo".' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'LaunchTo' 2
+            Add-TabLog $script:eqLog 'El Explorador vuelve a abrirse en Inicio / Acceso rápido (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Activar el historial del portapapeles (Win+V)'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'Con Win+V puedes pegar cualquiera de las últimas cosas copiadas, no solo la última. El historial se guarda en este equipo y se borra al reiniciar. Ten en cuenta que también guarda lo que copies de un gestor de contraseñas; por eso no se marca como recomendado.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Microsoft\Clipboard' 'EnableClipboardHistory'
+            if ($v -eq 1) { New-EquipoState 'Activado' $true } else { New-EquipoState 'Desactivado' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Clipboard' 'EnableClipboardHistory' 1
+            Add-TabLog $script:eqLog 'Historial del portapapeles activado. Úsalo con Win+V.' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Clipboard' 'EnableClipboardHistory' 0
+            Add-TabLog $script:eqLog 'Historial del portapapeles desactivado (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Activar rutas largas (más de 260 caracteres)'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $true
+        Description = 'Quita el límite histórico de 260 caracteres en las rutas de archivo. Evita errores al copiar, descomprimir o hacer copias de seguridad de carpetas muy anidadas. Solo lo aprovechan los programas preparados para ello; no afecta al resto. Windows lo trae desactivado.'
+        Target      = 'Todos'
+        RecDesktop  = $true
+        RecLaptop   = $true
+        State       = {
+            $v = Get-RegValueSafe 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' 'LongPathsEnabled'
+            if ($v -eq 1) { New-EquipoState 'Activadas' $true } else { New-EquipoState 'Desactivadas' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' 'LongPathsEnabled' 1
+            Add-TabLog $script:eqLog 'Rutas largas activadas. Los programas lo notan al volver a abrirse.' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' 'LongPathsEnabled' 0
+            Add-TabLog $script:eqLog 'Rutas largas desactivadas (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Cerrar antes los programas colgados al apagar'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'Al apagar, reiniciar o cerrar sesión, Windows cierra por su cuenta los programas que no responden en lugar de quedarse esperando en la pantalla "Esta aplicación impide el apagado". Apaga más rápido, pero un programa con cambios sin guardar se cerrará sin preguntar: guarda antes de apagar.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Control Panel\Desktop' 'AutoEndTasks'
+            if ([string]$v -eq '1') { New-EquipoState 'Activado' $true } else { New-EquipoState 'Desactivado (Windows espera)' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Control Panel\Desktop' 'AutoEndTasks' '1' 'String'
+            Set-RegValue 'HKCU:\Control Panel\Desktop' 'HungAppTimeout' '3000' 'String'
+            Set-RegValue 'HKCU:\Control Panel\Desktop' 'WaitToKillAppTimeout' '5000' 'String'
+            Add-TabLog $script:eqLog 'Cierre automático de programas colgados al apagar activado. Se aplica al iniciar sesión de nuevo.' 'OK'
+        }
+        Undo        = {
+            foreach ($nombre in @('AutoEndTasks', 'HungAppTimeout', 'WaitToKillAppTimeout')) {
+                Remove-RegValue 'HKCU:\Control Panel\Desktop' $nombre
+            }
+            Add-TabLog $script:eqLog 'Windows vuelve a esperar a los programas al apagar (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Mensajes detallados al arrancar y al apagar'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $true
+        Description = 'En lugar de "Espere un momento", Windows indica qué está haciendo en cada paso del arranque, el apagado y el inicio de sesión. No acelera nada, pero permite ver de un vistazo qué servicio o directiva está retrasando el equipo. Pensado para diagnóstico en taller.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = Get-RegValueSafe 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'VerboseStatus'
+            if ($v -eq 1) { New-EquipoState 'Activados' $true } else { New-EquipoState 'Desactivados' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'VerboseStatus' 1
+            Add-TabLog $script:eqLog 'Mensajes detallados de arranque y apagado activados.' 'OK'
+        }
+        Undo        = {
+            Remove-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'VerboseStatus'
+            Add-TabLog $script:eqLog 'Mensajes detallados de arranque y apagado desactivados (valor de Windows).' 'OK'
+        }
     }
 )
 
@@ -5414,6 +5615,10 @@ $eqButtons.Controls.Add($btnEqRec)
 $btnEqNone = New-ActionButton 'Quitar marcas'
 $eqButtons.Controls.Add($btnEqNone)
 
+$script:btnEqUndo = New-ActionButton 'Deshacer'
+$script:btnEqUndo.Enabled = $false
+$eqButtons.Controls.Add($script:btnEqUndo)
+
 $eqRightLayout = New-Object System.Windows.Forms.TableLayoutPanel
 $eqRightLayout.Dock = 'Fill'
 $eqRightLayout.ColumnCount = 1
@@ -5456,6 +5661,7 @@ $eqTip.SetToolTip($btnEqCrashes, 'Busca pantallazos azules y apagados inesperado
 $eqTip.SetToolTip($btnEqMemory, 'Programa el diagnóstico de memoria de Windows. Se ejecuta al reiniciar.')
 $eqTip.SetToolTip($script:btnEqBattery, 'Genera el informe de batería de Windows (capacidad real, ciclos y autonomía). Solo en portátiles.')
 $eqTip.SetToolTip($btnEqRec, 'Marca los ajustes recomendados para este tipo de equipo que todavía no están aplicados.')
+$eqTip.SetToolTip($script:btnEqUndo, 'Devuelve el ajuste seleccionado al valor que trae Windows. Disponible en los ajustes del grupo "Windows más ágil" que ya están aplicados.')
 
 $grpEqLog = New-Object System.Windows.Forms.GroupBox
 $grpEqLog.Text = 'Registro'
@@ -5517,7 +5723,7 @@ function Update-EquipoList {
         $script:eqList.Items.Clear()
         $script:eqList.Groups.Clear()
         $grupos = @{}
-        foreach ($nombre in @('Energía', 'Rendimiento y aspecto', 'Disco', 'Juegos')) {
+        foreach ($nombre in @('Energía', 'Rendimiento y aspecto', 'Windows más ágil', 'Disco', 'Juegos')) {
             $g = New-Object System.Windows.Forms.ListViewGroup($nombre, $nombre)
             [void]$script:eqList.Groups.Add($g)
             $grupos[$nombre] = $g
@@ -5550,6 +5756,7 @@ function Update-EquipoList {
         $script:eqList.EndUpdate()
         $script:eqSyncing = $false
     }
+    if ($script:btnEqUndo) { $script:btnEqUndo.Enabled = $false }
 }
 
 function Update-EquipoTab {
@@ -5562,7 +5769,10 @@ function Update-EquipoTab {
     $script:btnEqBattery.Enabled = [bool]$script:hardware.HasBattery
 
     $script:equipoList = @($script:equipoActions | Where-Object {
+        (-not $_.MinBuild) -or ($script:WinBuild -ge [int]$_.MinBuild)
+    } | Where-Object {
         ($_.Target -eq 'Todos') -or
+        ($_.Target -eq 'Win11' -and $script:WinBuild -ge 22000) -or
         ($_.Target -eq 'Portatil' -and $script:hardware.IsLaptop) -or
         ($_.Target -eq 'Sobremesa' -and -not $script:hardware.IsLaptop) -or
         ($_.Target -eq 'SSD' -and ($script:hardware.DiskKind -eq 'SSD' -or $script:hardware.DiskKind -eq 'Mixto')) -or
@@ -5593,8 +5803,49 @@ function Show-EquipoDetail {
     $extra = @()
     if ($info.Recommended) { $extra += 'Recomendado para este equipo.' }
     if ($accion.NeedsAdmin) { $extra += 'Necesita permisos de administrador.' }
+    if ($accion.Undo) { $extra += 'Se puede deshacer con el botón "Deshacer".' }
     if ($extra.Count -gt 0) { $lineas += ''; $lineas += ($extra -join ' ') }
     $script:eqDetail.Text = ($lineas -join "`r`n")
+}
+
+# Devuelve al valor de fábrica de Windows el ajuste seleccionado (solo los
+# ajustes que definen un bloque Undo, es decir, el grupo "Windows más ágil").
+function Update-EquipoUndoButton {
+    $puede = $false
+    if ($script:eqList.SelectedItems.Count -gt 0) {
+        $info = $script:eqList.SelectedItems[0].Tag
+        if ($info -and $info.Action.Undo -and $info.State.Applied) { $puede = $true }
+    }
+    $script:btnEqUndo.Enabled = $puede
+}
+
+function Invoke-EquipoUndo {
+    if ($script:eqList.SelectedItems.Count -eq 0) { return }
+    $info = $script:eqList.SelectedItems[0].Tag
+    if (-not $info -or -not $info.Action.Undo) { return }
+    $accion = $info.Action
+    if ($accion.NeedsAdmin -and -not (Assert-Admin)) { return }
+    if (-not $UiSmokeTest) {
+        $respuesta = [System.Windows.Forms.MessageBox]::Show(
+            ("Se va a deshacer este ajuste y dejarlo como viene en Windows:`n`n - {0}   (ahora: {1})`n`n¿Continuar?" -f $accion.Name, $info.State.Text),
+            "$script:AppName - deshacer ajuste", 'YesNo', 'Question')
+        if ($respuesta -ne 'Yes') { return }
+    }
+    $script:busy = $true
+    $script:form.UseWaitCursor = $true
+    try {
+        Add-TabLog $script:eqLog ('Deshacer: {0}' -f $accion.Name) 'STEP'
+        & $accion.Undo
+        $script:statusLabel.Text = 'Ajuste deshecho'
+    } catch {
+        Add-TabLog $script:eqLog ('Error al deshacer: {0}' -f $_.Exception.Message) 'ERROR'
+        Write-Diag ('Rendimiento, deshacer "{0}": {1}' -f $accion.Name, $_.Exception.ToString())
+    } finally {
+        $script:form.UseWaitCursor = $false
+        $script:busy = $false
+    }
+    Update-EquipoList
+    Update-EquipoUndoButton
 }
 
 function Set-EquipoChecked {
@@ -6651,7 +6902,14 @@ $btnEqCrashes.add_Click({ Show-CrashHistory })
 $btnEqMemory.add_Click({ Start-MemoryDiagnostic })
 $script:btnEqBattery.add_Click({ New-BatteryReport })
 
-$script:eqList.add_SelectedIndexChanged({ Show-EquipoDetail })
+$script:eqList.add_SelectedIndexChanged({
+    Show-EquipoDetail
+    Update-EquipoUndoButton
+})
+$script:btnEqUndo.add_Click({
+    if ($script:busy) { return }
+    Invoke-EquipoUndo
+})
 
 # Solo puede haber un plan de energía marcado: al marcar uno se desmarcan los demás.
 $script:eqList.add_ItemChecked({
@@ -10382,6 +10640,1643 @@ $btnIniTaskMgr.add_Click({ try { Start-Process -FilePath 'taskmgr.exe' -Argument
 $btnIniSave.add_Click({ Save-LogBox $script:iniLog 'registro_inicio' })
 $btnIniClear.add_Click({ $script:iniLog.Clear() })
 
+# ---------------------------------------------------------------------------
+# Subpestaña: Puertos (puertos abiertos en este equipo)
+# ---------------------------------------------------------------------------
+# El escaneo solo lee: puertos a la escucha, programa que los abre, su firma
+# digital y si el cortafuegos de Windows deja entrar conexiones. Lo único que
+# cambia algo es "Bloquear puerto", que crea una regla de entrada propia
+# (grupo WinTaller) y se quita con "Quitar bloqueo".
+
+# Puertos conocidos: servicio, riesgo si queda expuesto a la red y consejo.
+$script:PortKnowledge = @{
+    'TCP/21'    = @('FTP', 'Alto', 'Transferencia de archivos sin cifrar: el usuario y la contraseña viajan en claro. Si no usas un servidor FTP, desinstálalo o bloquea el puerto.')
+    'TCP/22'    = @('SSH', 'Medio', 'Acceso remoto por consola (OpenSSH). Correcto si lo has instalado tú: usa claves en lugar de contraseña y no lo expongas a Internet sin protección.')
+    'TCP/23'    = @('Telnet', 'Alto', 'Consola remota sin cifrar. No debería estar activo en ningún equipo actual: desinstala el servidor Telnet.')
+    'TCP/25'    = @('SMTP', 'Medio', 'Servidor de correo saliente. En un PC normal no debería haber ninguno; comprueba qué programa lo abre.')
+    'TCP/53'    = @('DNS', 'Medio', 'Servidor DNS. Lo abren Hyper-V, WSL, Docker o la Conexión compartida a Internet. Normal si usas alguno de ellos.')
+    'UDP/53'    = @('DNS', 'Medio', 'Servidor DNS. Lo abren Hyper-V, WSL, Docker o la Conexión compartida a Internet. Normal si usas alguno de ellos.')
+    'UDP/67'    = @('DHCP', 'Bajo', 'Servidor DHCP (Hyper-V, Conexión compartida a Internet o zona con cobertura inalámbrica).')
+    'UDP/68'    = @('DHCP', 'Bajo', 'Cliente DHCP: lo usa Windows para recibir su dirección IP. Normal.')
+    'TCP/80'    = @('HTTP', 'Medio', 'Servidor web sin cifrar (IIS, Apache, XAMPP o un programa con panel web). Comprueba qué programa lo abre y si de verdad lo necesitas.')
+    'UDP/123'   = @('NTP', 'Bajo', 'Sincronización de la hora. Normal.')
+    'TCP/135'   = @('RPC', 'Medio', 'Asignador de extremos RPC de Windows. Siempre está a la escucha y Windows lo necesita; no se puede cerrar. Lo importante es que no sea accesible desde Internet.')
+    'UDP/137'   = @('NetBIOS', 'Medio', 'Nombres NetBIOS (compartición antigua). Solo hace falta con equipos muy antiguos. Se desactiva en el adaptador: IPv4 > Opciones avanzadas > WINS > Deshabilitar NetBIOS.')
+    'UDP/138'   = @('NetBIOS', 'Medio', 'Datagramas NetBIOS (compartición antigua). Solo hace falta con equipos muy antiguos. Se desactiva en el adaptador: IPv4 > Opciones avanzadas > WINS > Deshabilitar NetBIOS.')
+    'TCP/139'   = @('NetBIOS', 'Medio', 'Sesiones NetBIOS (compartición antigua). Solo hace falta con equipos muy antiguos. Se desactiva en el adaptador: IPv4 > Opciones avanzadas > WINS > Deshabilitar NetBIOS.')
+    'UDP/161'   = @('SNMP', 'Medio', 'Monitorización SNMP. Las versiones 1 y 2 no cifran nada. Desactívalo si no monitorizas este equipo.')
+    'TCP/443'   = @('HTTPS', 'Medio', 'Servidor web cifrado. Comprueba qué programa lo abre y si de verdad lo necesitas.')
+    'TCP/445'   = @('SMB', 'Alto', 'Carpetas e impresoras compartidas de Windows. Normal en una red de casa u oficina con el perfil de red Privado. Nunca debe ser accesible desde Internet ni en redes públicas: es la vía de entrada de WannaCry y similares.')
+    'UDP/500'   = @('IPsec', 'Bajo', 'Negociación de VPN IPsec (IKE). Normal en Windows.')
+    'TCP/902'   = @('VMware', 'Bajo', 'Servicio de autorización de VMware Workstation.')
+    'TCP/912'   = @('VMware', 'Bajo', 'Servicio de autorización de VMware Workstation.')
+    'TCP/1433'  = @('SQL Server', 'Medio', 'Base de datos Microsoft SQL Server. En un equipo de desarrollo lo normal es que solo escuche en 127.0.0.1.')
+    'UDP/1434'  = @('SQL Server', 'Medio', 'Explorador de SQL Server. Desactívalo si no hay otras máquinas que se conecten a la base de datos.')
+    'TCP/1723'  = @('VPN PPTP', 'Alto', 'Servidor VPN PPTP, un protocolo obsoleto y roto. Sustitúyelo por WireGuard, OpenVPN o IKEv2.')
+    'TCP/1883'  = @('MQTT', 'Medio', 'Mensajería MQTT (domótica, IoT) sin cifrar.')
+    'UDP/1900'  = @('SSDP', 'Bajo', 'Detección UPnP de dispositivos en la red local. Normal en redes domésticas.')
+    'TCP/2049'  = @('NFS', 'Medio', 'Compartición de archivos NFS. Comprueba que solo la usan los equipos previstos.')
+    'TCP/2179'  = @('Hyper-V', 'Bajo', 'Conexión a máquinas virtuales de Hyper-V.')
+    'TCP/2869'  = @('UPnP', 'Bajo', 'Eventos UPnP de dispositivos de la red local. Normal en redes domésticas.')
+    'TCP/3000'  = @('Web (desarrollo)', 'Medio', 'Puerto habitual de servidores web de desarrollo (Node, React, Grafana...).')
+    'TCP/3306'  = @('MySQL', 'Medio', 'Base de datos MySQL o MariaDB. En un equipo de desarrollo lo normal es que solo escuche en 127.0.0.1.')
+    'TCP/3389'  = @('Escritorio remoto', 'Alto', 'Escritorio remoto (RDP). Es el puerto más atacado de Internet. Úsalo solo dentro de la red local o a través de una VPN, con contraseña fuerte y Autenticación a nivel de red. Si no lo usas, desactívalo en Configuración > Sistema > Escritorio remoto.')
+    'UDP/3389'  = @('Escritorio remoto', 'Alto', 'Escritorio remoto (RDP) sobre UDP. Úsalo solo dentro de la red local o a través de una VPN. Si no lo usas, desactívalo en Configuración > Sistema > Escritorio remoto.')
+    'UDP/3702'  = @('WS-Discovery', 'Bajo', 'Detección de impresoras y equipos de la red local. Normal con la detección de redes activada.')
+    'UDP/4500'  = @('IPsec', 'Bajo', 'VPN IPsec a través de NAT. Normal en Windows.')
+    'TCP/5000'  = @('Web (desarrollo)', 'Medio', 'Puerto habitual de servidores web de desarrollo (Flask, .NET, registros Docker...).')
+    'TCP/5040'  = @('Windows (CDP)', 'Bajo', 'Plataforma de dispositivos conectados de Windows (compartir con dispositivos cercanos). Normal.')
+    'UDP/5050'  = @('Windows (CDP)', 'Bajo', 'Plataforma de dispositivos conectados de Windows. Normal.')
+    'UDP/5353'  = @('mDNS', 'Bajo', 'Detección de dispositivos en la red local (mDNS). Lo abren Windows y los navegadores. Normal.')
+    'UDP/5355'  = @('LLMNR', 'Bajo', 'Resolución de nombres en la red local (LLMNR). Normal en Windows.')
+    'TCP/5357'  = @('WSD', 'Bajo', 'Detección de dispositivos de red (WSDAPI). Normal con la detección de redes activada.')
+    'TCP/5432'  = @('PostgreSQL', 'Medio', 'Base de datos PostgreSQL. En un equipo de desarrollo lo normal es que solo escuche en 127.0.0.1.')
+    'TCP/5900'  = @('VNC', 'Alto', 'Control remoto VNC. Muchas versiones no cifran la sesión. Úsalo solo en la red local o a través de una VPN, siempre con contraseña.')
+    'TCP/5938'  = @('TeamViewer', 'Medio', 'Control remoto TeamViewer. Correcto si lo usas; si no, desinstálalo.')
+    'TCP/5985'  = @('WinRM', 'Medio', 'Administración remota de Windows (PowerShell remoto) sin cifrar por HTTP. Si no administras este equipo a distancia, desactívalo con: Disable-PSRemoting -Force')
+    'TCP/5986'  = @('WinRM', 'Medio', 'Administración remota de Windows (PowerShell remoto) por HTTPS. Si no administras este equipo a distancia, desactívalo con: Disable-PSRemoting -Force')
+    'TCP/6379'  = @('Redis', 'Alto', 'Base de datos Redis. Por defecto no pide contraseña: nunca debe ser accesible desde otros equipos.')
+    'TCP/7070'  = @('AnyDesk', 'Medio', 'Control remoto AnyDesk (conexiones directas). Correcto si lo usas; si no, desinstálalo.')
+    'TCP/7680'  = @('Optimización de entrega', 'Bajo', 'Windows comparte actualizaciones con otros equipos. Se desactiva en Configuración > Windows Update > Opciones avanzadas > Optimización de distribución.')
+    'TCP/8000'  = @('Web (desarrollo)', 'Medio', 'Puerto habitual de servidores web de desarrollo o del panel de algún programa.')
+    'TCP/8080'  = @('Web alternativo', 'Medio', 'Servidor web o proxy en un puerto alternativo. Comprueba qué programa lo abre.')
+    'TCP/8443'  = @('Web alternativo', 'Medio', 'Servidor web cifrado en un puerto alternativo. Comprueba qué programa lo abre.')
+    'TCP/9200'  = @('Elasticsearch', 'Alto', 'Elasticsearch. Sin configurar no pide contraseña: no debe ser accesible desde otros equipos.')
+    'TCP/27017' = @('MongoDB', 'Alto', 'Base de datos MongoDB. Las instalaciones antiguas no piden contraseña: no debe ser accesible desde otros equipos.')
+    'TCP/47001' = @('WinRM (local)', 'Bajo', 'Escucha interna de WinRM (HTTP.sys). Normal en Windows; no acepta sesiones remotas si WinRM no está configurado.')
+}
+
+function Get-PortKnowledge {
+    param([string]$Proto, [int]$Port)
+    $clave = '{0}/{1}' -f $Proto, $Port
+    if ($script:PortKnowledge.ContainsKey($clave)) {
+        $d = $script:PortKnowledge[$clave]
+        return [pscustomobject]@{ Service = $d[0]; Risk = $d[1]; Advice = $d[2]; Known = $true }
+    }
+    if ($Port -ge 49152) {
+        return [pscustomobject]@{ Service = 'Dinámico'; Risk = 'Bajo'; Advice = 'Puerto dinámico: Windows y los programas los abren para sus comunicaciones internas (RPC y similares) y cambian en cada arranque. Fíjate en qué programa lo abre.'; Known = $false }
+    }
+    return [pscustomobject]@{ Service = ''; Risk = 'Desconocido'; Advice = 'No es un puerto de uso habitual. Lo importante es qué programa lo abre: si lo reconoces (un juego, un programa de sincronización, un servidor que has instalado), es normal.'; Known = $false }
+}
+
+# Firma digital de un ejecutable, con caché (comprobarla tarda).
+$script:signatureCache = @{}
+function Get-FileSignatureInfo {
+    param([string]$Path)
+    if (-not $Path) { return [pscustomobject]@{ Status = 'Desconocido'; Signer = '' } }
+    $clave = $Path.ToLowerInvariant()
+    if ($script:signatureCache.ContainsKey($clave)) { return $script:signatureCache[$clave] }
+    $info = [pscustomobject]@{ Status = 'Desconocido'; Signer = '' }
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            $firma = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+            $info.Status = [string]$firma.Status
+            if ($firma.SignerCertificate) { $info.Signer = [string]$firma.SignerCertificate.GetNameInfo('SimpleName', $false) }
+        } else {
+            $info.Status = 'Archivo no encontrado'
+        }
+    } catch { $info.Status = 'Error al comprobar' }
+    $script:signatureCache[$clave] = $info
+    return $info
+}
+
+function Get-SignatureLabel {
+    param($Info)
+    switch ([string]$Info.Status) {
+        'Valid'                 { if ($Info.Signer) { return $Info.Signer } else { return 'Firmado' } }
+        'NotSigned'             { return 'SIN FIRMA' }
+        'HashMismatch'          { return 'FIRMA ALTERADA' }
+        'NotTrusted'            { return 'Firma no fiable' }
+        'UnknownError'          { return 'Firma no válida' }
+        'Desconocido'           { return 'No se pudo comprobar' }
+    }
+    return [string]$Info.Status
+}
+
+# Estado del cortafuegos de Windows en los perfiles de red activos.
+function Get-FirewallContext {
+    $ctx = [pscustomobject]@{ Known = $false; Active = @('Public'); Enabled = $true; DefaultAllow = $false; Text = 'No se pudo consultar el cortafuegos de Windows' }
+    try {
+        $categorias = @(Get-NetConnectionProfile -ErrorAction Stop | ForEach-Object { [string]$_.NetworkCategory })
+        $activos = @($categorias | ForEach-Object { if ($_ -eq 'DomainAuthenticated') { 'Domain' } else { $_ } } | Where-Object { $_ } | Select-Object -Unique)
+        if ($activos.Count -gt 0) { $ctx.Active = $activos }
+    } catch { }
+    try {
+        $perfiles = @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { $ctx.Active -contains [string]$_.Name })
+        if ($perfiles.Count -gt 0) {
+            $ctx.Known = $true
+            $ctx.Enabled = (@($perfiles | Where-Object { [string]$_.Enabled -ne 'True' }).Count -eq 0)
+            $ctx.DefaultAllow = (@($perfiles | Where-Object { [string]$_.DefaultInboundAction -eq 'Allow' }).Count -gt 0)
+            $nombres = @($ctx.Active | ForEach-Object { switch ($_) { 'Domain' { 'Dominio' } 'Private' { 'Privada' } 'Public' { 'Pública' } default { $_ } } })
+            $ctx.Text = ('Red {0} · cortafuegos {1}' -f ($nombres -join ' + '), $(if ($ctx.Enabled) { 'activado' } else { 'DESACTIVADO' }))
+        }
+    } catch { }
+    return $ctx
+}
+
+# Reglas de entrada activas del cortafuegos, leídas del registro (es mucho más
+# rápido que Get-NetFirewallRule + Get-NetFirewallPortFilter).
+function Get-FirewallInboundRules {
+    $reglas = New-Object System.Collections.ArrayList
+    $claves = @(
+        'HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules',
+        'HKLM:\SOFTWARE\Policies\Microsoft\WindowsFirewall\FirewallRules'
+    )
+    foreach ($clave in $claves) {
+        $k = $null
+        try { $k = Get-Item -LiteralPath $clave -ErrorAction Stop } catch { continue }
+        foreach ($nombreValor in $k.GetValueNames()) {
+            $texto = [string]$k.GetValue($nombreValor)
+            if ($texto -notmatch '\|Dir=In\|' -or $texto -notmatch '\|Active=TRUE\|') { continue }
+            $perfiles = New-Object System.Collections.ArrayList
+            $puertos = New-Object System.Collections.ArrayList
+            $r = [pscustomobject]@{ Id = [string]$nombreValor; Action = ''; Protocol = ''; Profiles = @(); Ports = @(); App = ''; Svc = ''; Name = ''; Scoped = $false; Packaged = $false; Context = ''; General = $false }
+            foreach ($campo in $texto.Split('|')) {
+                $i = $campo.IndexOf('=')
+                if ($i -lt 1) { continue }
+                $c = $campo.Substring(0, $i)
+                $v = $campo.Substring($i + 1)
+                if ($c -eq 'Action') { $r.Action = $v }
+                elseif ($c -eq 'Protocol') { $r.Protocol = $v }
+                elseif ($c -eq 'Profile') { [void]$perfiles.Add($v) }
+                elseif ($c -like 'LPort*') { [void]$puertos.Add($v) }
+                elseif ($c -eq 'App') { $r.App = [Environment]::ExpandEnvironmentVariables($v) }
+                elseif ($c -eq 'Svc') { $r.Svc = $v }
+                elseif ($c -eq 'Name') { $r.Name = $v }
+                elseif ($c -like 'RA4*' -or $c -like 'RA6*') { $r.Scoped = $true }
+                elseif ($c -eq 'EmbedCtxt') { $r.Context = $v }
+                # AppPkgId/PFN/LUOwn: solo para una app empaquetada o un usuario.
+                # TTK*: solo para un tipo de tráfico (Teredo, Wi-Fi Direct, UPnP...).
+                elseif ($c -eq 'AppPkgId' -or $c -eq 'PFN' -or $c -like 'LUOwn*' -or $c -like 'LUAuth*' -or $c -like 'TTK*') { $r.Packaged = $true }
+            }
+            # Las reglas de aplicaciones de la Store (AppContainer) o de un usuario
+            # concreto solo valen para ese paquete: no abren el puerto a un
+            # programa de escritorio o a un servicio.
+            if ($r.Packaged) { continue }
+            # Regla general: deja entrar todo, sin protocolo, puerto ni programa.
+            # Es lo que crean TinyWall y otros cortafuegos que filtran por su cuenta.
+            $r.General = ($r.Action -eq 'Allow' -and -not $r.Protocol -and $puertos.Count -eq 0 -and -not $r.App -and -not $r.Svc -and -not $r.Scoped)
+            $r.Profiles = $perfiles.ToArray()
+            $r.Ports = $puertos.ToArray()
+            [void]$reglas.Add($r)
+        }
+    }
+    return $reglas.ToArray()
+}
+
+function Test-FirewallRuleMatch {
+    param($Rule, [int]$ProtoNumber, [int]$Port, [int]$ProcessId, [string]$Path, [string[]]$Services, [string[]]$ActiveProfiles)
+    if ($Rule.Protocol -and [string]$Rule.Protocol -ne [string]$ProtoNumber) { return $false }
+    if (@($Rule.Profiles).Count -gt 0) {
+        if (@($Rule.Profiles | Where-Object { $ActiveProfiles -contains $_ }).Count -eq 0) { return $false }
+    }
+    if (@($Rule.Ports).Count -gt 0) {
+        $coincide = $false
+        foreach ($p in $Rule.Ports) {
+            if ($p -match '^\d+$') { if ([int]$p -eq $Port) { $coincide = $true } }
+            elseif ($p -match '^(\d+)-(\d+)$') { if ($Port -ge [int]$Matches[1] -and $Port -le [int]$Matches[2]) { $coincide = $true } }
+            elseif ($p -eq 'RPC') { if ($Port -ge 49152) { $coincide = $true } }
+            elseif ($p -eq 'RPC-EPMap') { if ($Port -eq 135) { $coincide = $true } }
+            if ($coincide) { break }
+        }
+        if (-not $coincide) { return $false }
+    }
+    if ($Rule.App) {
+        if ($Rule.App -eq 'System') {
+            if ($ProcessId -ne 4) { return $false }
+        } elseif ($Path) {
+            if (-not [string]::Equals([string]$Rule.App, $Path, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        } elseif (@($Rule.Ports | Where-Object { $_ -match '^\d+(-\d+)?$' }).Count -eq 0) {
+            # Sin la ruta del proceso (falta de permisos) no se sabe si la regla
+            # es de este programa. Solo se da por buena si fija el puerto con
+            # un número o un rango (no con "RPC", que vale para cualquiera).
+            return $false
+        }
+    }
+    if ($Rule.Svc) {
+        if ($Rule.Svc -eq '*') {
+            if (@($Services).Count -eq 0) { return $false }
+        } elseif (@($Services) -notcontains [string]$Rule.Svc) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-PortBlockRuleName {
+    param([string]$Proto, [int]$Port)
+    return ('WinTaller-Bloqueo-{0}-{1}' -f $Proto, $Port)
+}
+
+# Puertos a la escucha (TCP) y enlazados (UDP). Si los cmdlets de red no
+# están disponibles se usa netstat.
+function Get-ListeningEndpoints {
+    $lista = New-Object System.Collections.ArrayList
+    $conCmdlets = $false
+    try {
+        foreach ($c in @(Get-NetTCPConnection -State Listen -ErrorAction Stop)) {
+            [void]$lista.Add([pscustomobject]@{ Proto = 'TCP'; Address = [string]$c.LocalAddress; Port = [int]$c.LocalPort; ProcessId = [int]$c.OwningProcess })
+        }
+        $conCmdlets = $true
+    } catch { }
+    if ($conCmdlets) {
+        try {
+            foreach ($u in @(Get-NetUDPEndpoint -ErrorAction Stop)) {
+                [void]$lista.Add([pscustomobject]@{ Proto = 'UDP'; Address = [string]$u.LocalAddress; Port = [int]$u.LocalPort; ProcessId = [int]$u.OwningProcess })
+            }
+        } catch { }
+        return $lista.ToArray()
+    }
+    $netstat = Join-Path $env:SystemRoot 'System32\netstat.exe'
+    foreach ($linea in @(& $netstat -ano 2>$null)) {
+        if ($linea -match '^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$') {
+            [void]$lista.Add([pscustomobject]@{ Proto = 'TCP'; Address = $Matches[1].Trim('[', ']'); Port = [int]$Matches[2]; ProcessId = [int]$Matches[3] })
+        } elseif ($linea -match '^\s*UDP\s+(\S+):(\d+)\s+\*:\*\s+(\d+)\s*$') {
+            [void]$lista.Add([pscustomobject]@{ Proto = 'UDP'; Address = $Matches[1].Trim('[', ']'); Port = [int]$Matches[2]; ProcessId = [int]$Matches[3] })
+        }
+    }
+    return $lista.ToArray()
+}
+
+function Test-LoopbackAddress {
+    param([string]$Address)
+    $a = ([string]$Address -replace '%.*$', '')
+    return ($a -eq '::1' -or $a -like '127.*')
+}
+
+# Escaneo completo: devuelve un objeto por puerto y proceso, ya valorado.
+function Get-OpenPorts {
+    $extremos = @(Get-ListeningEndpoints)
+    $fw = Get-FirewallContext
+    $reglas = @(Get-FirewallInboundRules)
+
+    $procesos = @{}
+    try {
+        foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, ExecutablePath -ErrorAction Stop)) {
+            $procesos[[int]$p.ProcessId] = $p
+        }
+    } catch { }
+    $serviciosPorPid = @{}
+    try {
+        foreach ($s in @(Get-CimInstance -ClassName Win32_Service -Property Name, ProcessId -ErrorAction Stop)) {
+            $idProceso = [int]$s.ProcessId
+            if ($idProceso -le 0) { continue }
+            if (-not $serviciosPorPid.ContainsKey($idProceso)) { $serviciosPorPid[$idProceso] = New-Object System.Collections.ArrayList }
+            [void]$serviciosPorPid[$idProceso].Add([string]$s.Name)
+        }
+    } catch { }
+
+    # Otro cortafuegos (TinyWall y similares): deja una regla general "permitir
+    # todo" en el de Windows y filtra él. En ese caso las reglas de Windows no
+    # dicen qué puertos están abiertos de verdad.
+    $fw | Add-Member -NotePropertyName External -NotePropertyValue '' -Force
+    $generales = @($reglas | Where-Object { $_.General -and (@($_.Profiles).Count -eq 0 -or @($_.Profiles | Where-Object { $fw.Active -contains $_ }).Count -gt 0) })
+    if ($generales.Count -gt 0 -and $fw.Enabled) {
+        $contexto = [string]($generales | ForEach-Object { $_.Context } | Where-Object { $_ -and -not $_.StartsWith('@') } | Select-Object -First 1)
+        $enMarcha = @()
+        foreach ($lista in $serviciosPorPid.Values) { $enMarcha += @($lista.ToArray()) }
+        if ($contexto -and @($enMarcha | Where-Object { $_ -like ($contexto + '*') }).Count -gt 0) {
+            $fw.External = $contexto
+            $fw.Text = ('{0} · filtra {1}, no el cortafuegos de Windows' -f $fw.Text, $contexto)
+        }
+    }
+
+    $resultado = New-Object System.Collections.ArrayList
+    $grupos = $extremos | Group-Object { '{0}|{1}|{2}' -f $_.Proto, $_.Port, $_.ProcessId }
+    foreach ($g in $grupos) {
+        $primero = $g.Group[0]
+        $proto = [string]$primero.Proto
+        $puerto = [int]$primero.Port
+        $idProceso = [int]$primero.ProcessId
+        $direcciones = @($g.Group | ForEach-Object { $_.Address } | Select-Object -Unique)
+        $soloLocal = (@($direcciones | Where-Object { -not (Test-LoopbackAddress $_) }).Count -eq 0)
+
+        $nombreProceso = ''
+        $ruta = ''
+        if ($idProceso -eq 4) {
+            $nombreProceso = 'System (núcleo de Windows)'
+        } elseif ($procesos.ContainsKey($idProceso)) {
+            $nombreProceso = [string]$procesos[$idProceso].Name
+            $ruta = [string]$procesos[$idProceso].ExecutablePath
+            if (-not $ruta -and $nombreProceso -match '^[\w.\-]+\.exe$') {
+                # Sin administrador WMI no da la ruta de los procesos del sistema.
+                $enSistema = Join-Path $env:SystemRoot ('System32\' + $nombreProceso)
+                if (Test-Path -LiteralPath $enSistema) { $ruta = $enSistema }
+            }
+        } else {
+            $nombreProceso = ('PID {0}' -f $idProceso)
+        }
+        $servicios = @()
+        if ($serviciosPorPid.ContainsKey($idProceso)) { $servicios = @($serviciosPorPid[$idProceso].ToArray()) }
+
+        $conocido = Get-PortKnowledge -Proto $proto -Port $puerto
+        $firma = [pscustomobject]@{ Status = 'Desconocido'; Signer = '' }
+        if ($idProceso -eq 4) { $firma = [pscustomobject]@{ Status = 'Valid'; Signer = 'Microsoft Windows' } }
+        elseif ($ruta) { $firma = Get-FileSignatureInfo $ruta }
+
+        # Cortafuegos
+        $codigo = 'none'
+        $nombresRegla = @()
+        if ($soloLocal) {
+            $codigo = 'local'
+        } else {
+            $protoNumero = 6
+            if ($proto -eq 'UDP') { $protoNumero = 17 }
+            $coinciden = @($reglas | Where-Object {
+                Test-FirewallRuleMatch -Rule $_ -ProtoNumber $protoNumero -Port $puerto -ProcessId $idProceso -Path $ruta -Services $servicios -ActiveProfiles $fw.Active
+            })
+            $bloqueos = @($coinciden | Where-Object { $_.Action -eq 'Block' })
+            $permisos = @($coinciden | Where-Object { $_.Action -eq 'Allow' })
+            $propia = Get-PortBlockRuleName -Proto $proto -Port $puerto
+            if (-not $fw.Enabled) {
+                $codigo = 'off'
+            } elseif (@($bloqueos | Where-Object { $_.Id -eq $propia }).Count -gt 0) {
+                $codigo = 'wt-block'
+            } elseif ($bloqueos.Count -gt 0) {
+                $codigo = 'block'
+                $nombresRegla = @($bloqueos | ForEach-Object { $_.Name })
+            } elseif ($fw.External) {
+                $codigo = 'external'
+            } elseif ($permisos.Count -gt 0) {
+                if (@($permisos | Where-Object { -not $_.Scoped }).Count -eq 0) { $codigo = 'allow-local' } else { $codigo = 'allow' }
+                $nombresRegla = @($permisos | ForEach-Object { $_.Name })
+            } elseif ($fw.DefaultAllow) {
+                $codigo = 'off'
+            }
+        }
+        $nombresRegla = @($nombresRegla | Where-Object { $_ -and -not $_.StartsWith('@') } | Select-Object -Unique -First 4)
+        $idsRegla = @()
+        if ($codigo -eq 'allow' -or $codigo -eq 'allow-local') { $idsRegla = @($permisos | ForEach-Object { $_.Id } | Select-Object -First 3) }
+
+        $alcance = switch ($codigo) {
+            'local'       { 'Solo este equipo' }
+            'wt-block'    { 'Bloqueado por WinTaller' }
+            'block'       { 'Bloqueado por una regla' }
+            'allow'       { 'Red: el cortafuegos lo permite' }
+            'allow-local' { 'Red: permitido con origen limitado' }
+            'off'         { 'Red: cortafuegos sin protección' }
+            'external'    { ('Lo decide {0}' -f $fw.External) }
+            default       { 'Sin regla de entrada' }
+        }
+
+        # Valoración
+        $accesible = ($codigo -eq 'allow' -or $codigo -eq 'off')
+        $limitado = ($codigo -eq 'allow-local')
+        $sinFirma = ($ruta -and (@('NotSigned', 'HashMismatch', 'NotTrusted', 'UnknownError') -contains [string]$firma.Status))
+        $nivel = 'OK'
+        if ($codigo -eq 'external') {
+            # No se sabe si el otro cortafuegos lo deja pasar: solo se avisa de
+            # los puertos delicados y de los programas sin firma.
+            $nivel = 'INFO'
+            if ([string]$conocido.Risk -eq 'Alto' -or $sinFirma) { $nivel = 'WARN' }
+        } elseif ($codigo -ne 'local' -and $codigo -ne 'block' -and $codigo -ne 'wt-block') {
+            switch ([string]$conocido.Risk) {
+                'Alto'  { if ($accesible) { $nivel = 'BAD' } elseif ($limitado) { $nivel = 'WARN' } else { $nivel = 'INFO' } }
+                'Medio' { if ($accesible) { $nivel = 'WARN' } else { $nivel = 'INFO' } }
+                default { if ($accesible -or $limitado) { $nivel = 'INFO' } else { $nivel = 'OK' } }
+            }
+            if ($sinFirma -and ($accesible -or $limitado) -and $nivel -ne 'BAD') { $nivel = 'WARN' }
+        }
+        $valoracion = switch ($nivel) { 'BAD' { 'Revisar ya' } 'WARN' { 'Revisar' } 'INFO' { 'Informativo' } default { 'Correcto' } }
+        if ($codigo -eq 'external' -and $nivel -eq 'WARN') { $valoracion = ('Comprobar en {0}' -f $fw.External) }
+
+        [void]$resultado.Add([pscustomobject]@{
+            Key         = ('{0}|{1}|{2}' -f $proto, $puerto, $idProceso)
+            Proto       = $proto
+            Port        = $puerto
+            ProcessId   = $idProceso
+            Process     = $nombreProceso
+            Path        = $ruta
+            Services    = $servicios
+            Addresses   = $direcciones
+            Local       = $soloLocal
+            Known       = $conocido
+            Signature   = $firma
+            FwCode      = $codigo
+            Scope       = $alcance
+            Rules       = $nombresRegla
+            RuleIds     = $idsRegla
+            Level       = $nivel
+            Verdict     = $valoracion
+            Unsigned    = [bool]$sinFirma
+        })
+    }
+    return [pscustomobject]@{ Firewall = $fw; Ports = $resultado.ToArray() }
+}
+
+$tabPuertos = New-Object System.Windows.Forms.TabPage
+$tabPuertos.Text = 'Puertos'
+$tabPuertos.Padding = New-Object System.Windows.Forms.Padding(8)
+$tabPuertos.UseVisualStyleBackColor = $true
+
+$ptLayout = New-Object System.Windows.Forms.TableLayoutPanel
+$ptLayout.Dock = 'Fill'
+$ptLayout.ColumnCount = 1
+$ptLayout.RowCount = 3
+[void]$ptLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 26)))
+[void]$ptLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 44)))
+[void]$ptLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$tabPuertos.Controls.Add($ptLayout)
+
+$ptHeader = New-Object System.Windows.Forms.TableLayoutPanel
+$ptHeader.Dock = 'Fill'
+$ptHeader.ColumnCount = 2
+$ptHeader.RowCount = 1
+[void]$ptHeader.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
+[void]$ptHeader.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 50)))
+$ptLayout.Controls.Add($ptHeader, 0, 0)
+
+$lblPtInfo = New-Object System.Windows.Forms.Label
+$lblPtInfo.Dock = 'Fill'
+$lblPtInfo.TextAlign = 'MiddleLeft'
+$lblPtInfo.AutoEllipsis = $true
+$lblPtInfo.Text = 'Puertos abiertos en este equipo y qué programa los usa. El escaneo no cambia nada.'
+$ptHeader.Controls.Add($lblPtInfo, 0, 0)
+
+$script:lblPtResumen = New-Object System.Windows.Forms.Label
+$script:lblPtResumen.Dock = 'Fill'
+$script:lblPtResumen.TextAlign = 'MiddleRight'
+$script:lblPtResumen.AutoEllipsis = $true
+$script:lblPtResumen.ForeColor = [System.Drawing.Color]::FromArgb(90, 90, 90)
+$script:lblPtResumen.Text = 'Sin escanear'
+$ptHeader.Controls.Add($script:lblPtResumen, 1, 0)
+
+$ptButtons = New-Object System.Windows.Forms.TableLayoutPanel
+$ptButtons.Dock = 'Fill'
+$ptButtons.ColumnCount = 2
+$ptButtons.RowCount = 1
+[void]$ptButtons.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 68)))
+[void]$ptButtons.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 32)))
+$ptLayout.Controls.Add($ptButtons, 0, 1)
+
+$ptButtonsLeft = New-Object System.Windows.Forms.FlowLayoutPanel
+$ptButtonsLeft.Dock = 'Fill'
+$ptButtonsLeft.WrapContents = $false
+$ptButtonsLeft.FlowDirection = 'LeftToRight'
+$ptButtons.Controls.Add($ptButtonsLeft, 0, 0)
+
+$script:btnPtScan = New-ActionButton 'Escanear puertos' ([System.Drawing.Color]::FromArgb(0, 120, 215)) ([System.Drawing.Color]::White)
+$ptButtonsLeft.Controls.Add($script:btnPtScan)
+
+$script:btnPtBlock = New-ActionButton 'Bloquear puerto'
+$script:btnPtBlock.Enabled = $false
+$ptButtonsLeft.Controls.Add($script:btnPtBlock)
+
+$script:btnPtUnblock = New-ActionButton 'Quitar bloqueo'
+$script:btnPtUnblock.Enabled = $false
+$ptButtonsLeft.Controls.Add($script:btnPtUnblock)
+
+$script:chkPtUdp = New-Object System.Windows.Forms.CheckBox
+$script:chkPtUdp.Text = 'Incluir UDP'
+$script:chkPtUdp.AutoSize = $true
+$script:chkPtUdp.Margin = New-Object System.Windows.Forms.Padding(12, 12, 4, 0)
+$ptButtonsLeft.Controls.Add($script:chkPtUdp)
+
+$script:chkPtNet = New-Object System.Windows.Forms.CheckBox
+$script:chkPtNet.Text = 'Solo abiertos a la red'
+$script:chkPtNet.AutoSize = $true
+$script:chkPtNet.Margin = New-Object System.Windows.Forms.Padding(8, 12, 4, 0)
+$ptButtonsLeft.Controls.Add($script:chkPtNet)
+
+$ptButtonsRight = New-Object System.Windows.Forms.FlowLayoutPanel
+$ptButtonsRight.Dock = 'Fill'
+$ptButtonsRight.WrapContents = $false
+$ptButtonsRight.FlowDirection = 'RightToLeft'
+$ptButtons.Controls.Add($ptButtonsRight, 1, 0)
+
+$btnPtFirewall = New-ActionButton 'Cortafuegos'
+$ptButtonsRight.Controls.Add($btnPtFirewall)
+
+$script:btnPtOpen = New-ActionButton 'Abrir ubicación'
+$script:btnPtOpen.Enabled = $false
+$ptButtonsRight.Controls.Add($script:btnPtOpen)
+
+$ptTip = New-Object System.Windows.Forms.ToolTip
+$ptTip.SetToolTip($script:btnPtScan, 'Busca los puertos a la escucha, el programa que los abre y si el cortafuegos deja entrar conexiones.')
+$ptTip.SetToolTip($script:btnPtBlock, 'Crea una regla en el cortafuegos de Windows que impide a otros equipos conectarse al puerto seleccionado.')
+$ptTip.SetToolTip($script:btnPtUnblock, 'Quita la regla de bloqueo que creó WinTaller para el puerto seleccionado.')
+$ptTip.SetToolTip($script:chkPtUdp, 'Muestra también los puertos UDP. Suelen ser muchos y la mayoría son de uso interno.')
+$ptTip.SetToolTip($script:chkPtNet, 'Oculta los puertos que solo escuchan en este equipo (127.0.0.1) y los que el cortafuegos no deja pasar.')
+$ptTip.SetToolTip($btnPtFirewall, 'Abre el cortafuegos de Windows con seguridad avanzada (reglas de entrada).')
+$ptTip.SetToolTip($script:btnPtOpen, 'Abre en el Explorador la carpeta del programa que usa el puerto seleccionado.')
+
+$script:ptSplit = New-Object System.Windows.Forms.SplitContainer
+$script:ptSplit.Dock = 'Fill'
+$script:ptSplit.Orientation = 'Vertical'
+$script:ptSplit.SplitterWidth = 6
+$script:ptSplit.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 232)
+$ptLayout.Controls.Add($script:ptSplit, 0, 2)
+
+$script:grpPtList = New-Object System.Windows.Forms.GroupBox
+$script:grpPtList.Text = 'Puertos a la escucha'
+$script:grpPtList.Dock = 'Fill'
+$script:grpPtList.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+$script:ptSplit.Panel1.Controls.Add($script:grpPtList)
+
+$script:ptList = New-Object System.Windows.Forms.ListView
+$script:ptList.Dock = 'Fill'
+$script:ptList.View = 'Details'
+$script:ptList.FullRowSelect = $true
+$script:ptList.MultiSelect = $false
+$script:ptList.HideSelection = $false
+$script:ptList.ShowItemToolTips = $true
+$script:ptList.ShowGroups = $true
+$script:ptList.BorderStyle = 'FixedSingle'
+$script:ptList.Font = $script:uiFont
+[void]$script:ptList.Columns.Add('Puerto', 78)
+[void]$script:ptList.Columns.Add('Servicio', 125)
+[void]$script:ptList.Columns.Add('Programa', 165)
+[void]$script:ptList.Columns.Add('Alcance', 205)
+[void]$script:ptList.Columns.Add('Valoración', 85)
+$script:grpPtList.Controls.Add($script:ptList)
+
+$ptRightLayout = New-Object System.Windows.Forms.TableLayoutPanel
+$ptRightLayout.Dock = 'Fill'
+$ptRightLayout.ColumnCount = 1
+$ptRightLayout.RowCount = 2
+[void]$ptRightLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 58)))
+[void]$ptRightLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 42)))
+$script:ptSplit.Panel2.Controls.Add($ptRightLayout)
+
+$grpPtDetail = New-Object System.Windows.Forms.GroupBox
+$grpPtDetail.Text = 'Detalle'
+$grpPtDetail.Dock = 'Fill'
+$grpPtDetail.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+$ptRightLayout.Controls.Add($grpPtDetail, 0, 0)
+
+$script:ptDetail = New-Object System.Windows.Forms.TextBox
+$script:ptDetail.Dock = 'Fill'
+$script:ptDetail.Multiline = $true
+$script:ptDetail.ReadOnly = $true
+$script:ptDetail.BorderStyle = 'None'
+$script:ptDetail.ScrollBars = 'Vertical'
+$script:ptDetail.TabStop = $false
+$script:ptDetail.BackColor = [System.Drawing.SystemColors]::Control
+$script:ptDetail.ForeColor = [System.Drawing.Color]::FromArgb(70, 70, 70)
+$script:ptDetail.Text = 'Pulsa "Escanear puertos" y selecciona uno para ver qué es, qué programa lo abre y qué hacer con él.'
+$grpPtDetail.Controls.Add($script:ptDetail)
+
+$grpPtLog = New-Object System.Windows.Forms.GroupBox
+$grpPtLog.Text = 'Registro'
+$grpPtLog.Dock = 'Fill'
+$grpPtLog.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+$ptRightLayout.Controls.Add($grpPtLog, 0, 1)
+
+$ptLogLayout = New-Object System.Windows.Forms.TableLayoutPanel
+$ptLogLayout.Dock = 'Fill'
+$ptLogLayout.ColumnCount = 1
+$ptLogLayout.RowCount = 2
+[void]$ptLogLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 40)))
+[void]$ptLogLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$grpPtLog.Controls.Add($ptLogLayout)
+
+$ptLogButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$ptLogButtons.Dock = 'Fill'
+$ptLogButtons.FlowDirection = 'RightToLeft'
+$ptLogButtons.WrapContents = $false
+$ptLogLayout.Controls.Add($ptLogButtons, 0, 0)
+
+$btnPtSave = New-ActionButton 'Guardar registro'
+$ptLogButtons.Controls.Add($btnPtSave)
+
+$btnPtClear = New-ActionButton 'Limpiar'
+$ptLogButtons.Controls.Add($btnPtClear)
+
+$script:ptLog = New-LogView
+$ptLogLayout.Controls.Add($script:ptLog, 0, 1)
+
+$script:ptLoaded  = $false
+$script:ptEntries = @()
+$script:ptFirewall = $null
+
+function Get-SelectedPort {
+    if ($script:ptList.SelectedItems.Count -eq 0) { return $null }
+    return $script:ptList.SelectedItems[0].Tag
+}
+
+function Update-PortButtons {
+    $e = Get-SelectedPort
+    $script:btnPtBlock.Enabled   = [bool]($e -and -not $e.Local -and $e.FwCode -ne 'wt-block')
+    $script:btnPtUnblock.Enabled = [bool]($e -and $e.FwCode -eq 'wt-block')
+    $script:btnPtOpen.Enabled    = [bool]($e -and $e.Path -and (Test-Path -LiteralPath $e.Path))
+}
+
+# Pinta la lista con los filtros actuales (no vuelve a escanear).
+function Show-PortList {
+    $seleccion = ''
+    $actual = Get-SelectedPort
+    if ($actual) { $seleccion = [string]$actual.Key }
+
+    $visibles = @($script:ptEntries)
+    if (-not $script:chkPtUdp.Checked) { $visibles = @($visibles | Where-Object { $_.Proto -eq 'TCP' }) }
+    if ($script:chkPtNet.Checked) { $visibles = @($visibles | Where-Object { $_.FwCode -eq 'allow' -or $_.FwCode -eq 'allow-local' -or $_.FwCode -eq 'off' -or $_.FwCode -eq 'external' }) }
+    $orden = @{ 'BAD' = 0; 'WARN' = 1; 'INFO' = 2; 'OK' = 3 }
+    $visibles = @($visibles | Sort-Object @{ Expression = { $orden[[string]$_.Level] } }, Port, Proto)
+
+    $script:ptList.BeginUpdate()
+    try {
+        $script:ptList.Items.Clear()
+        $script:ptList.Groups.Clear()
+        $gRed = New-Object System.Windows.Forms.ListViewGroup('red', 'Abiertos a la red (otros equipos pueden conectarse)')
+        $gCerrado = New-Object System.Windows.Forms.ListViewGroup('cerrado', 'A la escucha, pero el cortafuegos no deja entrar')
+        $gLocal = New-Object System.Windows.Forms.ListViewGroup('local', 'Solo este equipo (uso interno)')
+        $gOtro = New-Object System.Windows.Forms.ListViewGroup('otro', 'A la escucha en la red: lo filtra otro cortafuegos (no se puede valorar desde aquí)')
+        [void]$script:ptList.Groups.AddRange([System.Windows.Forms.ListViewGroup[]]@($gRed, $gOtro, $gCerrado, $gLocal))
+        foreach ($e in $visibles) {
+            $item = New-Object System.Windows.Forms.ListViewItem(('{0} {1}' -f $e.Port, $e.Proto))
+            [void]$item.SubItems.Add([string]$e.Known.Service)
+            $programa = [string]$e.Process
+            if (@($e.Services).Count -gt 0 -and $e.ProcessId -ne 4) {
+                $programa = ('{0} ({1})' -f $e.Process, (@($e.Services | Select-Object -First 2) -join ', '))
+            }
+            [void]$item.SubItems.Add($programa)
+            [void]$item.SubItems.Add([string]$e.Scope)
+            [void]$item.SubItems.Add([string]$e.Verdict)
+            $item.Tag = $e
+            $item.ToolTipText = ('{0} · {1}' -f $programa, $e.Scope)
+            if ($e.FwCode -eq 'local') {
+                $item.Group = $gLocal
+                $item.ForeColor = [System.Drawing.Color]::FromArgb(120, 120, 120)
+            } elseif ($e.FwCode -eq 'allow' -or $e.FwCode -eq 'allow-local' -or $e.FwCode -eq 'off') {
+                $item.Group = $gRed
+                $item.ForeColor = Get-SecurityLevelColor $e.Level
+            } elseif ($e.FwCode -eq 'external') {
+                $item.Group = $gOtro
+                $item.ForeColor = Get-SecurityLevelColor $e.Level
+            } else {
+                $item.Group = $gCerrado
+                $item.ForeColor = Get-SecurityLevelColor $e.Level
+            }
+            if ($e.Level -eq 'BAD') { $item.Font = $script:boldFont }
+            [void]$script:ptList.Items.Add($item)
+            if ($seleccion -and [string]$e.Key -eq $seleccion) { $item.Selected = $true }
+        }
+    } finally {
+        $script:ptList.EndUpdate()
+    }
+    $script:grpPtList.Text = ('Puertos a la escucha ({0} mostrados de {1})' -f $visibles.Count, @($script:ptEntries).Count)
+    Update-PortButtons
+}
+
+function Update-PortsTab {
+    $script:ptLoaded = $true
+    $script:form.UseWaitCursor = $true
+    $script:btnPtScan.Enabled = $false
+    $script:statusLabel.Text = 'Escaneando los puertos abiertos...'
+    [System.Windows.Forms.Application]::DoEvents()
+    try {
+        $escaneo = Get-OpenPorts
+        $script:ptEntries = @($escaneo.Ports)
+        $script:ptFirewall = $escaneo.Firewall
+    } catch {
+        $script:ptEntries = @()
+        Add-TabLog $script:ptLog ('No se pudo completar el escaneo: {0}' -f $_.Exception.Message) 'ERROR'
+        Write-Diag ('ERROR escaneando puertos: ' + $_.Exception.ToString())
+    } finally {
+        $script:form.UseWaitCursor = $false
+        $script:btnPtScan.Enabled = $true
+        $script:statusLabel.Text = 'Listo'
+    }
+
+    Show-PortList
+
+    $tcp = @($script:ptEntries | Where-Object { $_.Proto -eq 'TCP' }).Count
+    $udp = @($script:ptEntries | Where-Object { $_.Proto -eq 'UDP' }).Count
+    $red = @($script:ptEntries | Where-Object { $_.FwCode -eq 'allow' -or $_.FwCode -eq 'allow-local' -or $_.FwCode -eq 'off' })
+    $graves = @($script:ptEntries | Where-Object { $_.Level -eq 'BAD' })
+    $avisos = @($script:ptEntries | Where-Object { $_.Level -eq 'WARN' })
+    $texto = ('{0} TCP y {1} UDP · {2} abiertos a la red · {3} a revisar' -f $tcp, $udp, $red.Count, ($graves.Count + $avisos.Count))
+    $externos = @($script:ptEntries | Where-Object { $_.FwCode -eq 'external' })
+    if ($externos.Count -gt 0) {
+        $texto = ('{0} TCP y {1} UDP · {2} a la escucha en la red (filtra {3}) · {4} a revisar' -f $tcp, $udp, $externos.Count, $script:ptFirewall.External, ($graves.Count + $avisos.Count))
+    }
+    if ($graves.Count -gt 0) { $script:lblPtResumen.ForeColor = Get-SecurityLevelColor 'BAD' }
+    elseif ($avisos.Count -gt 0) { $script:lblPtResumen.ForeColor = Get-SecurityLevelColor 'WARN' }
+    else { $script:lblPtResumen.ForeColor = Get-SecurityLevelColor 'OK' }
+    $script:lblPtResumen.Text = $texto
+
+    Add-TabLog $script:ptLog ('Escaneo de puertos: {0}.' -f $texto) 'STEP'
+    if ($script:ptFirewall) {
+        $tipoFw = 'OK'
+        if (-not $script:ptFirewall.Enabled -or -not $script:ptFirewall.Known) { $tipoFw = 'WARN' }
+        Add-TabLog $script:ptLog $script:ptFirewall.Text $tipoFw
+        if ($script:ptFirewall.Known -and -not $script:ptFirewall.Enabled) {
+            Add-TabLog $script:ptLog 'El cortafuegos de Windows está desactivado en la red actual. Si no lo sustituye otro cortafuegos, todos los puertos a la escucha son accesibles.' 'WARN'
+        }
+    }
+    if ($script:ptFirewall -and $script:ptFirewall.External) {
+        Add-TabLog $script:ptLog ('{0} está instalado y deja una regla general en el cortafuegos de Windows: es {0} quien decide qué conexiones entran. Desde aquí se ve qué programa escucha en cada puerto, pero no si {0} lo deja pasar: compruébalo en su lista de excepciones.' -f $script:ptFirewall.External) 'WARN'
+    }
+    foreach ($e in @(@($red) + @($externos | Where-Object { $_.Proto -eq 'TCP' }) | Sort-Object Port)) {
+        $tipo = 'INFO'
+        if ($e.Level -eq 'BAD') { $tipo = 'ERROR' } elseif ($e.Level -eq 'WARN') { $tipo = 'WARN' }
+        Add-TabLog $script:ptLog ('{0}/{1} {2} · {3} · {4}' -f $e.Port, $e.Proto, $e.Known.Service, $e.Process, $e.Scope) $tipo
+    }
+    if (-not $script:IsAdmin) {
+        Add-TabLog $script:ptLog 'Sin permisos de administrador no se ve la ruta de algunos programas del sistema.'
+    }
+}
+
+function Show-PortDetail {
+    $e = Get-SelectedPort
+    if (-not $e) { return }
+    $lineas = New-Object System.Collections.ArrayList
+    $titulo = ('Puerto {0}/{1}' -f $e.Port, $e.Proto)
+    if ($e.Known.Service) { $titulo += (' · {0}' -f $e.Known.Service) }
+    [void]$lineas.Add($titulo)
+    [void]$lineas.Add(('Valoración: {0}' -f $e.Verdict))
+    [void]$lineas.Add('')
+    [void]$lineas.Add(('Programa: {0} (PID {1})' -f $e.Process, $e.ProcessId))
+    if ($e.Path) { [void]$lineas.Add(('Archivo: {0}' -f $e.Path)) }
+    if (@($e.Services).Count -gt 0) { [void]$lineas.Add(('Servicios: {0}' -f (@($e.Services) -join ', '))) }
+    if ($e.ProcessId -ne 4) { [void]$lineas.Add(('Firma digital: {0}' -f (Get-SignatureLabel $e.Signature))) }
+    $dirs = @($e.Addresses | ForEach-Object {
+        switch ([string]$_) { '0.0.0.0' { 'todas las interfaces (IPv4)' } '::' { 'todas las interfaces (IPv6)' } default { $_ } }
+    })
+    [void]$lineas.Add(('Escucha en: {0}' -f ($dirs -join ', ')))
+    [void]$lineas.Add('')
+
+    switch ([string]$e.FwCode) {
+        'local'       { [void]$lineas.Add('ALCANCE: solo este equipo. Escucha en 127.0.0.1 / ::1, así que ningún otro equipo puede conectarse. Es la forma en que los programas hablan entre sí dentro del PC.') }
+        'wt-block'    { [void]$lineas.Add('ALCANCE: bloqueado. WinTaller creó una regla que impide las conexiones entrantes a este puerto. Se quita con "Quitar bloqueo".') }
+        'block'       { [void]$lineas.Add('ALCANCE: bloqueado por una regla del cortafuegos de Windows.') }
+        'allow'       { [void]$lineas.Add('ALCANCE: abierto a la red. Hay una regla del cortafuegos que deja entrar conexiones en el perfil de red actual.') }
+        'allow-local' { [void]$lineas.Add('ALCANCE: abierto con origen limitado. Las reglas del cortafuegos solo dejan entrar conexiones desde direcciones concretas (normalmente la red local).') }
+        'external'    { [void]$lineas.Add(('ALCANCE: lo decide {0}. El programa escucha en la red, pero en este equipo las conexiones entrantes las filtra {0} y no el cortafuegos de Windows, así que desde aquí no se puede saber si el puerto está abierto. Míralo en las excepciones de {0}. "Bloquear puerto" sigue funcionando: un bloqueo del cortafuegos de Windows se aplica aunque {0} lo permita.' -f $script:ptFirewall.External)) }
+        'off'         { [void]$lineas.Add('ALCANCE: abierto a la red. El cortafuegos de Windows no está filtrando en el perfil de red actual (desactivado o con la entrada permitida por defecto).') }
+        default       { [void]$lineas.Add('ALCANCE: a la escucha, pero no se ha encontrado ninguna regla de entrada que lo permita, así que el cortafuegos de Windows descarta las conexiones de otros equipos.') }
+    }
+    if (@($e.Rules).Count -gt 0) { [void]$lineas.Add(('Reglas: {0}' -f (@($e.Rules) -join '; '))) }
+    if ($script:ptFirewall) { [void]$lineas.Add($script:ptFirewall.Text + '.') }
+    [void]$lineas.Add('')
+    [void]$lineas.Add($e.Known.Advice)
+    if ($e.Unsigned -and -not $e.Local) {
+        [void]$lineas.Add('')
+        [void]$lineas.Add('El programa no tiene una firma digital válida. No tiene por qué ser malware, pero si no lo reconoces, analízalo en Protección > Seguridad y bloquea el puerto mientras tanto.')
+    }
+    [void]$lineas.Add('')
+    [void]$lineas.Add('La valoración del cortafuegos es orientativa: se calcula con las reglas de entrada del cortafuegos de Windows y no tiene en cuenta el router ni otros cortafuegos instalados.')
+    $script:ptDetail.Text = ($lineas.ToArray() -join "`r`n")
+}
+
+function Set-SelectedPortBlock {
+    param([bool]$Block)
+    $e = Get-SelectedPort
+    if (-not $e) { return }
+    if (-not (Assert-Admin)) { return }
+    $nombre = Get-PortBlockRuleName -Proto $e.Proto -Port $e.Port
+    if ($Block) {
+        if (-not $UiSmokeTest) {
+            $r = [System.Windows.Forms.MessageBox]::Show(
+                ("Se va a crear una regla en el cortafuegos de Windows que bloquea las conexiones entrantes al puerto {0}/{1}.`n`nOtros equipos dejarán de poder conectarse a este servicio de este equipo ({2}). Por ejemplo: el 445 son las carpetas compartidas y el 3389 el Escritorio remoto.`n`nNo afecta a lo que este equipo hace hacia fuera y se deshace con 'Quitar bloqueo'.`n`n¿Continuar?" -f $e.Port, $e.Proto, $e.Process),
+                "$script:AppName - bloquear puerto", 'YesNo', 'Warning')
+            if ($r -ne 'Yes') { return }
+        }
+        try {
+            New-NetFirewallRule -Name $nombre -DisplayName ('WinTaller - Bloquear {0} {1}' -f $e.Proto, $e.Port) -Group 'WinTaller' `
+                -Description 'Regla creada por WinTaller (Protección > Puertos). Se puede quitar desde el propio programa.' `
+                -Direction Inbound -Action Block -Protocol $e.Proto -LocalPort $e.Port -Profile Any -ErrorAction Stop | Out-Null
+            Add-TabLog $script:ptLog ('Puerto {0}/{1} bloqueado en el cortafuegos (regla "{2}").' -f $e.Port, $e.Proto, $nombre) 'OK'
+        } catch {
+            Add-TabLog $script:ptLog ('No se pudo bloquear el puerto {0}/{1}: {2}' -f $e.Port, $e.Proto, $_.Exception.Message) 'ERROR'
+            return
+        }
+    } else {
+        try {
+            Remove-NetFirewallRule -Name $nombre -ErrorAction Stop
+            Add-TabLog $script:ptLog ('Bloqueo del puerto {0}/{1} quitado.' -f $e.Port, $e.Proto) 'OK'
+        } catch {
+            Add-TabLog $script:ptLog ('No se pudo quitar el bloqueo del puerto {0}/{1}: {2}' -f $e.Port, $e.Proto, $_.Exception.Message) 'ERROR'
+            return
+        }
+    }
+    Update-PortsTab
+    Show-PortDetail
+}
+
+$script:ptList.add_SelectedIndexChanged({
+    Show-PortDetail
+    Update-PortButtons
+})
+$script:btnPtScan.add_Click({ if (-not $script:busy) { Update-PortsTab } })
+$script:btnPtBlock.add_Click({ Set-SelectedPortBlock -Block $true })
+$script:btnPtUnblock.add_Click({ Set-SelectedPortBlock -Block $false })
+$script:chkPtUdp.add_CheckedChanged({ Show-PortList })
+$script:chkPtNet.add_CheckedChanged({ Show-PortList })
+$btnPtFirewall.add_Click({ try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\mmc.exe') -ArgumentList (Join-Path $env:SystemRoot 'System32\wf.msc') | Out-Null } catch { } })
+$script:btnPtOpen.add_Click({
+    $e = Get-SelectedPort
+    if (-not $e -or -not $e.Path) { return }
+    try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $e.Path) | Out-Null } catch { }
+})
+$btnPtSave.add_Click({ Save-LogBox $script:ptLog 'registro_puertos' })
+$btnPtClear.add_Click({ $script:ptLog.Clear() })
+
+Add-TabLog $script:ptLog 'Al abrir la pestaña se escanean los puertos de este equipo. El escaneo no cambia nada.'
+Add-TabLog $script:ptLog 'Bloquear o desbloquear un puerto necesita permisos de administrador.'
+
+
+# ---------------------------------------------------------------------------
+# Subpestaña: Privacidad (telemetría de Windows y de los programas)
+# ---------------------------------------------------------------------------
+# "Escanear" busca en este equipo los servicios, tareas programadas y ajustes
+# que envían datos de uso al fabricante. Cada elemento se puede desactivar y
+# volver a activar. Antes de desactivar se guarda la misma copia de ajustes
+# que usa Optimización ("Revertir cambios"), y el tipo de inicio original de
+# cada servicio se anota en ProgramData\WinTaller\privacidad.json.
+
+function New-PrivacyItem {
+    param(
+        [string]$Id,
+        [string]$Group,
+        [string]$Name,
+        [string]$Description,
+        [bool]$Recommended = $false,
+        [string[]]$Services = @(),    # 'Nombre=Auto' o 'Nombre=Manual' (el nombre admite comodines)
+        [string[]]$Tasks = @(),       # ruta completa de la tarea, con comodines
+        [object[]]$Reg = @(),         # @{ P = clave; N = valor; Off = dato que desactiva; On = dato que activa ($null = borrar el valor); T = tipo }
+        [string[]]$Env = @(),         # variables de entorno del usuario: '1' desactiva
+        [scriptblock]$Detect = $null, # indica si el programa está instalado
+        [string]$Warning = ''
+    )
+    return [pscustomobject]@{
+        Id = $Id; Group = $Group; Name = $Name; Description = $Description; Recommended = $Recommended
+        Services = $Services; Tasks = $Tasks; Reg = $Reg; Env = $Env; Detect = $Detect; Warning = $Warning
+    }
+}
+
+function Test-AnyPath {
+    param([string[]]$Paths)
+    foreach ($ruta in $Paths) {
+        if ($ruta -and (Test-Path -LiteralPath $ruta)) { return $true }
+    }
+    return $false
+}
+
+$script:PF64 = [string]$env:ProgramFiles
+$script:PF86 = [string]${env:ProgramFiles(x86)}
+if (-not $script:PF86) { $script:PF86 = $script:PF64 }
+
+$script:privCatalog = @(
+    # --- Windows: servicios y tareas -----------------------------------------
+    (New-PrivacyItem -Id 'win-diagtrack' -Group 'Windows: servicios y tareas' -Recommended $true `
+        -Name 'Servicio de telemetría de Windows (DiagTrack)' `
+        -Description 'El servicio "Experiencias del usuario y telemetría asociadas" recoge datos de uso y de diagnóstico y los envía a Microsoft. Desactivarlo no afecta a Windows Update, a la red ni a los programas.' `
+        -Warning 'Sin este servicio no se pueden recibir compilaciones de Windows Insider ni enviar comentarios desde el Centro de opiniones.' `
+        -Services @('DiagTrack=Auto')),
+    (New-PrivacyItem -Id 'win-wappush' -Group 'Windows: servicios y tareas' -Recommended $true `
+        -Name 'Enrutamiento de mensajes WAP (dmwappushservice)' `
+        -Description 'Servicio auxiliar de la telemetría y de la gestión remota de dispositivos. En un equipo que no gestiona una empresa no hace falta.' `
+        -Services @('dmwappushservice=Manual')),
+    (New-PrivacyItem -Id 'win-task-ceip' -Group 'Windows: servicios y tareas' -Recommended $true `
+        -Name 'Tareas del Programa de mejora de la experiencia (CEIP)' `
+        -Description 'Tareas programadas que recopilan y envían periódicamente estadísticas de uso de Windows y de los dispositivos USB.' `
+        -Tasks @('\Microsoft\Windows\Customer Experience Improvement Program\*')),
+    (New-PrivacyItem -Id 'win-task-appraiser' -Group 'Windows: servicios y tareas' -Recommended $true `
+        -Name 'Tareas de evaluación de compatibilidad (Appraiser)' `
+        -Description 'Inventarían los programas y el hardware del equipo y envían el resultado a Microsoft para valorar la compatibilidad con futuras versiones. Suelen ser la causa de picos de disco y CPU con el equipo en reposo. Windows Update puede volver a activarlas tras una actualización grande.' `
+        -Tasks @('\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser*', '\Microsoft\Windows\Application Experience\ProgramDataUpdater', '\Microsoft\Windows\Application Experience\StartupAppTask')),
+    (New-PrivacyItem -Id 'win-task-feedback' -Group 'Windows: servicios y tareas' -Recommended $true `
+        -Name 'Tareas de comentarios (Feedback)' `
+        -Description 'Tareas que descargan y lanzan las encuestas de opinión de Windows.' `
+        -Tasks @('\Microsoft\Windows\Feedback\Siuf\*')),
+    (New-PrivacyItem -Id 'win-task-diskdiag' -Group 'Windows: servicios y tareas' -Recommended $true `
+        -Name 'Recopilador de datos de diagnóstico de disco' `
+        -Description 'Envía a Microsoft información general del disco y del sistema para el Programa de mejora. No afecta a la detección de fallos del disco (SMART), que sigue funcionando.' `
+        -Tasks @('\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector')),
+    (New-PrivacyItem -Id 'win-wer' -Group 'Windows: servicios y tareas' -Recommended $false `
+        -Name 'Informe de errores de Windows' `
+        -Description 'Cuando un programa falla, Windows envía a Microsoft un informe que puede incluir un volcado de memoria. Al desactivarlo no se envía nada, pero tampoco se buscan soluciones ni quedan los informes locales que a veces ayudan a diagnosticar un fallo; por eso no se marca como recomendado.' `
+        -Reg @(@{ P = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'; N = 'Disabled'; Off = 1; On = $null })),
+
+    # --- Windows: ajustes de privacidad --------------------------------------
+    (New-PrivacyItem -Id 'win-allowtelemetry' -Group 'Windows: ajustes de privacidad' -Recommended $true `
+        -Name 'Datos de diagnóstico al mínimo (directiva)' `
+        -Description 'Fija por directiva el nivel de datos de diagnóstico más bajo que admite esta edición de Windows y desactiva los opcionales. En Windows Home y Pro el mínimo real son los "datos obligatorios"; el envío cero solo existe en Enterprise y Education.' `
+        -Warning 'En Configuración > Privacidad aparecerá "Tu organización administra algunas opciones". Es normal: es el efecto de la directiva.' `
+        -Reg @(@{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'; N = 'AllowTelemetry'; Off = 0; On = $null })),
+    (New-PrivacyItem -Id 'win-adid' -Group 'Windows: ajustes de privacidad' -Recommended $true `
+        -Name 'Id. de publicidad' `
+        -Description 'Identificador único que las aplicaciones usan para mostrar anuncios personalizados según tu actividad. Sin él los anuncios siguen apareciendo, pero no se basan en tu perfil.' `
+        -Reg @(@{ P = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo'; N = 'Enabled'; Off = 0; On = 1 })),
+    (New-PrivacyItem -Id 'win-tailored' -Group 'Windows: ajustes de privacidad' -Recommended $true `
+        -Name 'Experiencias personalizadas con los datos de diagnóstico' `
+        -Description 'Permite a Microsoft usar tus datos de diagnóstico para mostrarte consejos, anuncios y recomendaciones personalizados.' `
+        -Reg @(@{ P = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy'; N = 'TailoredExperiencesWithDiagnosticDataEnabled'; Off = 0; On = 1 })),
+    (New-PrivacyItem -Id 'win-feedback' -Group 'Windows: ajustes de privacidad' -Recommended $true `
+        -Name 'Encuestas de opinión de Windows' `
+        -Description 'Windows deja de pedir tu opinión con notificaciones ("¿Recomendarías Windows?").' `
+        -Reg @(@{ P = 'HKCU:\Software\Microsoft\Siuf\Rules'; N = 'NumberOfSIUFInPeriod'; Off = 0; On = $null })),
+    (New-PrivacyItem -Id 'win-activity' -Group 'Windows: ajustes de privacidad' -Recommended $true `
+        -Name 'Historial de actividad' `
+        -Description 'Windows deja de registrar las aplicaciones y documentos que abres y de enviar ese historial a tu cuenta de Microsoft.' `
+        -Reg @(
+            @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; N = 'PublishUserActivities'; Off = 0; On = $null },
+            @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'; N = 'UploadUserActivities'; Off = 0; On = $null }
+        )),
+    (New-PrivacyItem -Id 'win-input' -Group 'Windows: ajustes de privacidad' -Recommended $false `
+        -Name 'Personalización de escritura y entrada manuscrita' `
+        -Description 'Windows deja de aprender de lo que escribes (teclado, lápiz y contactos) para mejorar las sugerencias. Empeoran las sugerencias de texto y el dictado; por eso no se marca como recomendado.' `
+        -Reg @(
+            @{ P = 'HKCU:\Software\Microsoft\InputPersonalization'; N = 'RestrictImplicitInkCollection'; Off = 1; On = 0 },
+            @{ P = 'HKCU:\Software\Microsoft\InputPersonalization'; N = 'RestrictImplicitTextCollection'; Off = 1; On = 0 },
+            @{ P = 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore'; N = 'HarvestContacts'; Off = 0; On = 1 },
+            @{ P = 'HKCU:\Software\Microsoft\Personalization\Settings'; N = 'AcceptedPrivacyPolicy'; Off = 0; On = 1 }
+        )),
+    (New-PrivacyItem -Id 'win-trackprogs' -Group 'Windows: ajustes de privacidad' -Recommended $false `
+        -Name 'Seguimiento de las aplicaciones que abres' `
+        -Description 'Windows deja de anotar qué programas inicias para ordenar el menú Inicio y la búsqueda. La lista de "más usadas" dejará de actualizarse.' `
+        -Reg @(@{ P = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; N = 'Start_TrackProgs'; Off = 0; On = 1 })),
+
+    # --- Programas instalados ------------------------------------------------
+    (New-PrivacyItem -Id 'app-office' -Group 'Programas instalados' -Recommended $true `
+        -Name 'Microsoft Office / Microsoft 365' `
+        -Description 'Fija por directiva que Office no envíe datos de diagnóstico opcionales ni obligatorios, y desactiva las tareas del agente de telemetría de Office si existen. No afecta a la activación ni a las actualizaciones.' `
+        -Detect { (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration') -or (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Office\16.0\Common\InstallRoot') -or (Test-Path -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\16.0\Common\InstallRoot') } `
+        -Reg @(@{ P = 'HKCU:\Software\Policies\Microsoft\office\common\clienttelemetry'; N = 'SendTelemetry'; Off = 3; On = $null }) `
+        -Tasks @('\Microsoft\Office\OfficeTelemetryAgent*')),
+    (New-PrivacyItem -Id 'app-edge' -Group 'Programas instalados' -Recommended $false `
+        -Name 'Microsoft Edge' `
+        -Description 'Fija por directiva que Edge no envíe datos de diagnóstico, que no use el historial de navegación para personalizar anuncios y servicios de Microsoft, y que no pida comentarios.' `
+        -Warning 'Edge mostrará "Tu organización administra el explorador". Es el efecto normal de cualquier directiva; por eso no se marca como recomendado en equipos de clientes.' `
+        -Detect { Test-AnyPath @((Join-Path $script:PF86 'Microsoft\Edge\Application\msedge.exe'), (Join-Path $script:PF64 'Microsoft\Edge\Application\msedge.exe')) } `
+        -Reg @(
+            @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N = 'DiagnosticData'; Off = 0; On = $null },
+            @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N = 'PersonalizationReportingEnabled'; Off = 0; On = $null },
+            @{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N = 'UserFeedbackAllowed'; Off = 0; On = $null }
+        )),
+    (New-PrivacyItem -Id 'app-firefox' -Group 'Programas instalados' -Recommended $false `
+        -Name 'Mozilla Firefox' `
+        -Description 'Fija por directiva que Firefox no envíe telemetría ni participe en estudios (experimentos remotos).' `
+        -Warning 'Firefox mostrará "Su navegador está siendo administrado por su organización". Es el efecto normal de cualquier directiva.' `
+        -Detect { Test-AnyPath @((Join-Path $script:PF64 'Mozilla Firefox\firefox.exe'), (Join-Path $script:PF86 'Mozilla Firefox\firefox.exe')) } `
+        -Reg @(
+            @{ P = 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox'; N = 'DisableTelemetry'; Off = 1; On = $null },
+            @{ P = 'HKLM:\SOFTWARE\Policies\Mozilla\Firefox'; N = 'DisableFirefoxStudies'; Off = 1; On = $null }
+        )),
+    (New-PrivacyItem -Id 'app-vs' -Group 'Programas instalados' -Recommended $true `
+        -Name 'Visual Studio' `
+        -Description 'Saca a Visual Studio del Programa para la mejora de la experiencia del cliente mediante su directiva oficial.' `
+        -Detect { (Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\VisualStudio\Setup') -or (Test-Path -LiteralPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\Setup') -or (Test-AnyPath @((Join-Path $script:PF64 'Microsoft Visual Studio'), (Join-Path $script:PF86 'Microsoft Visual Studio'))) } `
+        -Reg @(@{ P = 'HKLM:\SOFTWARE\Policies\Microsoft\VisualStudio\SQM'; N = 'OptIn'; Off = 0; On = $null })),
+    (New-PrivacyItem -Id 'app-dotnet' -Group 'Programas instalados' -Recommended $true `
+        -Name 'SDK de .NET (dotnet)' `
+        -Description 'Define la variable de entorno DOTNET_CLI_TELEMETRY_OPTOUT para que la herramienta "dotnet" no envíe datos de uso. Se aplica a las consolas que abras a partir de ahora.' `
+        -Detect { Test-AnyPath @((Join-Path $script:PF64 'dotnet\dotnet.exe')) } `
+        -Env @('DOTNET_CLI_TELEMETRY_OPTOUT')),
+    (New-PrivacyItem -Id 'app-pwsh' -Group 'Programas instalados' -Recommended $true `
+        -Name 'PowerShell 7' `
+        -Description 'Define la variable de entorno POWERSHELL_TELEMETRY_OPTOUT para que PowerShell 7 no envíe datos de uso al arrancar.' `
+        -Detect { Test-AnyPath @((Join-Path $script:PF64 'PowerShell\7\pwsh.exe')) } `
+        -Env @('POWERSHELL_TELEMETRY_OPTOUT')),
+    (New-PrivacyItem -Id 'app-nvidia' -Group 'Programas instalados' -Recommended $true `
+        -Name 'NVIDIA: telemetría de los controladores' `
+        -Description 'Servicio y tareas de telemetría que instalan los controladores de NVIDIA. No afectan a la gráfica ni a los juegos.' `
+        -Services @('NvTelemetryContainer=Auto') `
+        -Tasks @('\NvTmMon_*', '\NvTmRep_*', '\NvTmRepOnLogon_*')),
+    (New-PrivacyItem -Id 'app-intel' -Group 'Programas instalados' -Recommended $true `
+        -Name 'Intel: Programa de mejora informática' `
+        -Description 'Servicios del "Intel Computing Improvement Program", que recogen datos de uso del equipo. No afectan a los controladores de Intel.' `
+        -Services @('*_QUEENCREEK=Auto')),
+    (New-PrivacyItem -Id 'app-hp' -Group 'Programas instalados' -Recommended $true `
+        -Name 'HP Touchpoint Analytics' `
+        -Description 'Servicio de HP que recopila datos de uso y de hardware del equipo.' `
+        -Services @('HpTouchpointAnalyticsService=Auto')),
+    (New-PrivacyItem -Id 'app-dell' -Group 'Programas instalados' -Recommended $false `
+        -Name 'Dell Data Vault (SupportAssist)' `
+        -Description 'Servicios de Dell que recopilan datos de uso y de estado del hardware.' `
+        -Warning 'Dell SupportAssist usa estos datos para sus diagnósticos y avisos: si lo utilizas, no los desactives.' `
+        -Services @('DDVDataCollector=Auto', 'DDVRulesProcessor=Auto', 'DDVCollectorSvcApi=Auto'))
+)
+
+# Palabras que delatan telemetría en el nombre de un servicio o una tarea.
+$script:privKeywordPattern = '(?i)telemetr|ceip|customer experience|experiencia del cliente|usage ?report|analytics|improvement program|programa de mejora|feedback|data ?collector|crash ?report|\bmetrics\b|\bsqm\b'
+
+# Tipo de inicio original de los servicios desactivados (para restaurarlos).
+function Read-PrivacySavedState {
+    $tabla = @{}
+    if (-not $script:IsAdmin) { return $tabla }
+    try {
+        $archivo = Join-Path (Get-SecureDataRoot) 'privacidad.json'
+        if (-not (Test-Path -LiteralPath $archivo)) { return $tabla }
+        $datos = Get-Content -LiteralPath $archivo -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($prop in $datos.PSObject.Properties) {
+            $modo = [string]$prop.Value
+            if ($prop.Name -match '^[\w.\-$ ()]{1,256}$' -and @('Auto', 'DelayedAuto', 'Manual') -contains $modo) {
+                $tabla[[string]$prop.Name] = $modo
+            }
+        }
+    } catch {
+        Write-Diag ('Privacidad: no se pudo leer el estado guardado: ' + $_.Exception.Message)
+    }
+    return $tabla
+}
+
+function Save-PrivacySavedState {
+    param([hashtable]$Tabla)
+    if (-not $script:IsAdmin) { return }
+    try {
+        $archivo = Join-Path (Get-SecureDataRoot) 'privacidad.json'
+        $objeto = New-Object psobject
+        foreach ($clave in @($Tabla.Keys | Sort-Object)) {
+            $objeto | Add-Member -NotePropertyName ([string]$clave) -NotePropertyValue ([string]$Tabla[$clave])
+        }
+        $objeto | ConvertTo-Json | Set-Content -LiteralPath $archivo -Encoding UTF8
+    } catch {
+        Write-Diag ('Privacidad: no se pudo guardar el estado: ' + $_.Exception.Message)
+    }
+}
+
+# Lee una sola vez los servicios y las tareas del equipo para todo el escaneo.
+function Update-PrivacyCache {
+    $script:privSvc = @{}
+    $script:privTasks = @()
+    try {
+        foreach ($s in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) { $script:privSvc[[string]$s.Name] = $s }
+    } catch {
+        Write-Diag ('Privacidad: no se pudieron leer los servicios: ' + $_.Exception.Message)
+    }
+    try {
+        $script:privTasks = @(Get-ScheduledTask -ErrorAction Stop | ForEach-Object {
+            [pscustomobject]@{
+                Full     = ([string]$_.TaskPath + [string]$_.TaskName)
+                TaskName = [string]$_.TaskName
+                TaskPath = [string]$_.TaskPath
+                Disabled = ([string]$_.State -eq 'Disabled')
+            }
+        })
+    } catch {
+        Write-Diag ('Privacidad: no se pudieron leer las tareas programadas: ' + $_.Exception.Message)
+    }
+}
+
+# Componentes reales de un elemento en este equipo, con su estado actual.
+function Get-PrivacyComponents {
+    param($Item)
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($spec in @($Item.Services)) {
+        if (-not $spec) { continue }
+        $partes = ([string]$spec).Split('=')
+        $patron = $partes[0]
+        $porDefecto = 'Manual'
+        if ($partes.Count -gt 1) { $porDefecto = $partes[1] }
+        foreach ($nombre in @($script:privSvc.Keys | Where-Object { $_ -like $patron } | Sort-Object)) {
+            $svc = $script:privSvc[$nombre]
+            [void]$lista.Add([pscustomobject]@{
+                Kind = 'svc'; Name = [string]$nombre; Default = $porDefecto
+                Label = ('Servicio {0}' -f $nombre)
+                Off = ([string]$svc.StartMode -eq 'Disabled')
+                StateText = $(if ([string]$svc.StartMode -eq 'Disabled') { 'deshabilitado' } elseif ([string]$svc.State -eq 'Running') { 'en ejecución' } else { 'habilitado (parado)' })
+            })
+        }
+    }
+    foreach ($patron in @($Item.Tasks)) {
+        if (-not $patron) { continue }
+        foreach ($t in @($script:privTasks | Where-Object { $_.Full -like $patron })) {
+            [void]$lista.Add([pscustomobject]@{
+                Kind = 'task'; TaskName = $t.TaskName; TaskPath = $t.TaskPath
+                Label = ('Tarea {0}' -f $t.Full)
+                Off = [bool]$t.Disabled
+                StateText = $(if ($t.Disabled) { 'deshabilitada' } else { 'habilitada' })
+            })
+        }
+    }
+    foreach ($r in @($Item.Reg)) {
+        if (-not $r) { continue }
+        $actual = Get-RegValueSafe ([string]$r.P) ([string]$r.N)
+        $apagado = ($null -ne $actual -and [string]$actual -eq [string]$r.Off)
+        $tipo = 'DWord'
+        if ($r.T) { $tipo = [string]$r.T }
+        [void]$lista.Add([pscustomobject]@{
+            Kind = 'reg'; Path = [string]$r.P; ValueName = [string]$r.N; OffValue = $r.Off; OnValue = $r.On; Type = $tipo
+            Label = ('Registro {0}' -f $r.N)
+            Off = [bool]$apagado
+            StateText = $(if ($apagado) { 'desactivado' } elseif ($null -eq $actual) { 'sin configurar (activo por defecto)' } else { ('activo (valor {0})' -f $actual) })
+        })
+    }
+    foreach ($variable in @($Item.Env)) {
+        if (-not $variable) { continue }
+        $valor = [Environment]::GetEnvironmentVariable($variable, 'User')
+        if (-not $valor) { $valor = [Environment]::GetEnvironmentVariable($variable, 'Machine') }
+        $apagado = (@('1', 'true', 'yes') -contains ([string]$valor).ToLowerInvariant())
+        [void]$lista.Add([pscustomobject]@{
+            Kind = 'env'; Variable = [string]$variable
+            Label = ('Variable {0}' -f $variable)
+            Off = [bool]$apagado
+            StateText = $(if ($apagado) { 'definida (telemetría desactivada)' } else { 'sin definir (telemetría activa)' })
+        })
+    }
+    return $lista.ToArray()
+}
+
+# Estado de un elemento: si existe en este equipo y cuántas de sus partes
+# están ya desactivadas.
+function Get-PrivacyItemState {
+    param($Item)
+    $componentes = @(Get-PrivacyComponents $Item)
+    $hallados = @($componentes | Where-Object { $_.Kind -eq 'svc' -or $_.Kind -eq 'task' }).Count
+    $tieneFijos = ((@($Item.Reg).Count + @($Item.Env).Count) -gt 0)
+    $presente = $false
+    if ($Item.Detect) {
+        $detectado = $false
+        try { $detectado = [bool](& $Item.Detect) } catch { }
+        $presente = ($detectado -or $hallados -gt 0)
+    } elseif ($tieneFijos) {
+        $presente = $true
+    } else {
+        $presente = ($hallados -gt 0)
+    }
+    $total = $componentes.Count
+    $apagados = @($componentes | Where-Object { $_.Off }).Count
+    $texto = 'Activa'
+    $todoApagado = ($total -gt 0 -and $apagados -eq $total)
+    if ($todoApagado) { $texto = 'Desactivada' }
+    elseif ($apagados -gt 0) { $texto = ('Parcial ({0} de {1})' -f $apagados, $total) }
+    $necesitaAdmin = (@($componentes | Where-Object {
+        $_.Kind -eq 'svc' -or $_.Kind -eq 'task' -or ($_.Kind -eq 'reg' -and ($_.Path -like 'HKLM:*' -or $_.Path -like 'HKCU:\Software\Policies\*'))
+    }).Count -gt 0)
+    $tipos = @()
+    if (@($componentes | Where-Object { $_.Kind -eq 'svc' }).Count -gt 0) { $tipos += 'Servicio' }
+    if (@($componentes | Where-Object { $_.Kind -eq 'task' }).Count -gt 0) { $tipos += 'Tarea' }
+    if (@($componentes | Where-Object { $_.Kind -eq 'reg' -or $_.Kind -eq 'env' }).Count -gt 0) { $tipos += 'Ajuste' }
+    return [pscustomobject]@{
+        Present = [bool]$presente; Off = [bool]$todoApagado; Text = $texto
+        Components = $componentes; NeedsAdmin = [bool]$necesitaAdmin; Kind = ($tipos -join ' + ')
+    }
+}
+
+# Servicios y tareas de otros programas cuyo nombre indica telemetría y que
+# no están en el catálogo. Se muestran sin marcar, para revisarlos a mano.
+function Get-PrivacyGenericItems {
+    $cubiertos = @{}
+    foreach ($item in $script:privCatalog) {
+        foreach ($c in @(Get-PrivacyComponents $item)) {
+            if ($c.Kind -eq 'svc') { $cubiertos['svc:' + $c.Name.ToLowerInvariant()] = $true }
+            elseif ($c.Kind -eq 'task') { $cubiertos['task:' + ($c.TaskPath + $c.TaskName).ToLowerInvariant()] = $true }
+        }
+    }
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($nombre in @($script:privSvc.Keys | Sort-Object)) {
+        $svc = $script:privSvc[$nombre]
+        if ($cubiertos.ContainsKey('svc:' + $nombre.ToLowerInvariant())) { continue }
+        if ($script:CriticalServices -contains $nombre) { continue }
+        if (([string]$nombre + ' ' + [string]$svc.DisplayName) -notmatch $script:privKeywordPattern) { continue }
+        $porDefecto = 'Manual'
+        if ([string]$svc.StartMode -eq 'Auto') { $porDefecto = 'Auto' }
+        [void]$lista.Add((New-PrivacyItem -Id ('gen-svc-' + $nombre) -Group 'Otros detectados (revisar antes)' -Recommended $false `
+            -Name ('{0} (servicio)' -f $(if ($svc.DisplayName) { $svc.DisplayName } else { $nombre })) `
+            -Description ("Servicio detectado porque su nombre indica telemetría o estadísticas de uso.`r`nNombre: {0}`r`nArchivo: {1}`r`n{2}" -f $nombre, $svc.PathName, $svc.Description) `
+            -Warning 'No está en el catálogo de WinTaller: comprueba qué programa lo instala antes de desactivarlo. Si algo deja de funcionar, vuelve a activarlo desde aquí.' `
+            -Services @(('{0}={1}' -f ($nombre -replace '([\[\]\*\?`])', '`$1'), $porDefecto))))
+    }
+    foreach ($t in @($script:privTasks | Sort-Object Full)) {
+        if ($cubiertos.ContainsKey('task:' + $t.Full.ToLowerInvariant())) { continue }
+        if ($t.TaskPath -like '\Microsoft\Windows\*') { continue }
+        if ($t.Full -notmatch $script:privKeywordPattern) { continue }
+        [void]$lista.Add((New-PrivacyItem -Id ('gen-task-' + $t.Full) -Group 'Otros detectados (revisar antes)' -Recommended $false `
+            -Name ('{0} (tarea programada)' -f $t.TaskName) `
+            -Description ("Tarea programada detectada porque su nombre indica telemetría o estadísticas de uso.`r`nRuta: {0}" -f $t.Full) `
+            -Warning 'No está en el catálogo de WinTaller: comprueba qué programa la instala antes de desactivarla. Si algo deja de funcionar, vuelve a activarla desde aquí.' `
+            -Tasks @(($t.Full -replace '([\[\]\*\?`])', '`$1'))))
+    }
+    return $lista.ToArray()
+}
+
+# Desactiva (o vuelve a activar) un componente. Lanza excepción si falla.
+function Set-PrivacyComponent {
+    param($Component, [bool]$Off, [hashtable]$Saved)
+    switch ([string]$Component.Kind) {
+        'svc' {
+            $nombre = [string]$Component.Name
+            if ($script:CriticalServices -contains $nombre) { throw 'es un servicio crítico y no se modifica' }
+            $svc = $script:privSvc[$nombre]
+            if ($Off) {
+                if ($svc -and [string]$svc.StartMode -ne 'Disabled' -and -not $Saved.ContainsKey($nombre)) {
+                    $modo = 'Manual'
+                    if ([string]$svc.StartMode -eq 'Auto') { if ([bool]$svc.DelayedAutoStart) { $modo = 'DelayedAuto' } else { $modo = 'Auto' } }
+                    $Saved[$nombre] = $modo
+                }
+                try { Stop-Service -Name $nombre -Force -ErrorAction Stop } catch { }
+                Set-Service -Name $nombre -StartupType Disabled -ErrorAction Stop
+            } else {
+                $modo = [string]$Component.Default
+                if ($Saved.ContainsKey($nombre)) { $modo = [string]$Saved[$nombre] }
+                $valorSc = switch ($modo) { 'Auto' { 'auto' } 'DelayedAuto' { 'delayed-auto' } default { 'demand' } }
+                $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+                $salida = & $sc config $nombre start= $valorSc 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { throw $salida.Trim() }
+                if ($valorSc -ne 'demand') { try { Start-Service -Name $nombre -ErrorAction Stop } catch { } }
+                [void]$Saved.Remove($nombre)
+            }
+        }
+        'task' {
+            if ($Off) {
+                Disable-ScheduledTask -TaskName ([string]$Component.TaskName) -TaskPath ([string]$Component.TaskPath) -ErrorAction Stop | Out-Null
+            } else {
+                Enable-ScheduledTask -TaskName ([string]$Component.TaskName) -TaskPath ([string]$Component.TaskPath) -ErrorAction Stop | Out-Null
+            }
+        }
+        'reg' {
+            if ($Off) {
+                Set-RegValue $Component.Path $Component.ValueName $Component.OffValue $Component.Type
+            } elseif ($null -eq $Component.OnValue) {
+                Remove-RegValue $Component.Path $Component.ValueName
+            } else {
+                Set-RegValue $Component.Path $Component.ValueName $Component.OnValue $Component.Type
+            }
+        }
+        'env' {
+            if ($Off) {
+                [Environment]::SetEnvironmentVariable([string]$Component.Variable, '1', 'User')
+            } else {
+                [Environment]::SetEnvironmentVariable([string]$Component.Variable, $null, 'User')
+            }
+        }
+    }
+}
+
+$tabPrivacidad = New-Object System.Windows.Forms.TabPage
+$tabPrivacidad.Text = 'Privacidad'
+$tabPrivacidad.Padding = New-Object System.Windows.Forms.Padding(8)
+$tabPrivacidad.UseVisualStyleBackColor = $true
+
+$pvLayout = New-Object System.Windows.Forms.TableLayoutPanel
+$pvLayout.Dock = 'Fill'
+$pvLayout.ColumnCount = 1
+$pvLayout.RowCount = 3
+[void]$pvLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 26)))
+[void]$pvLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 44)))
+[void]$pvLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$tabPrivacidad.Controls.Add($pvLayout)
+
+$pvHeader = New-Object System.Windows.Forms.TableLayoutPanel
+$pvHeader.Dock = 'Fill'
+$pvHeader.ColumnCount = 2
+$pvHeader.RowCount = 1
+[void]$pvHeader.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 60)))
+[void]$pvHeader.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 40)))
+$pvLayout.Controls.Add($pvHeader, 0, 0)
+
+$lblPvInfo = New-Object System.Windows.Forms.Label
+$lblPvInfo.Dock = 'Fill'
+$lblPvInfo.TextAlign = 'MiddleLeft'
+$lblPvInfo.AutoEllipsis = $true
+$lblPvInfo.Text = 'Telemetría de Windows y de los programas instalados. Todo lo que se desactiva aquí se puede volver a activar.'
+$pvHeader.Controls.Add($lblPvInfo, 0, 0)
+
+$script:lblPvResumen = New-Object System.Windows.Forms.Label
+$script:lblPvResumen.Dock = 'Fill'
+$script:lblPvResumen.TextAlign = 'MiddleRight'
+$script:lblPvResumen.AutoEllipsis = $true
+$script:lblPvResumen.ForeColor = [System.Drawing.Color]::FromArgb(90, 90, 90)
+$script:lblPvResumen.Text = 'Sin escanear'
+$pvHeader.Controls.Add($script:lblPvResumen, 1, 0)
+
+$pvButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$pvButtons.Dock = 'Fill'
+$pvButtons.WrapContents = $false
+$pvButtons.FlowDirection = 'LeftToRight'
+$pvLayout.Controls.Add($pvButtons, 0, 1)
+
+$script:btnPvScan = New-ActionButton 'Escanear telemetría'
+$pvButtons.Controls.Add($script:btnPvScan)
+
+$script:btnPvOff = New-ActionButton 'Desactivar marcados' ([System.Drawing.Color]::FromArgb(0, 120, 215)) ([System.Drawing.Color]::White)
+$pvButtons.Controls.Add($script:btnPvOff)
+
+$script:btnPvOn = New-ActionButton 'Volver a activar marcados'
+$pvButtons.Controls.Add($script:btnPvOn)
+
+$btnPvRec = New-ActionButton 'Marcar recomendados'
+$pvButtons.Controls.Add($btnPvRec)
+
+$btnPvNone = New-ActionButton 'Quitar marcas'
+$pvButtons.Controls.Add($btnPvNone)
+
+$pvTip = New-Object System.Windows.Forms.ToolTip
+$pvTip.SetToolTip($script:btnPvScan, 'Vuelve a buscar la telemetría activa en este equipo: servicios, tareas programadas y ajustes de Windows y de los programas.')
+$pvTip.SetToolTip($script:btnPvOff, 'Desactiva la telemetría de los elementos marcados. Antes se guarda una copia de los ajustes.')
+$pvTip.SetToolTip($script:btnPvOn, 'Devuelve los elementos marcados a como estaban: servicios y tareas habilitados y ajustes con el valor de Windows.')
+$pvTip.SetToolTip($btnPvRec, 'Marca los elementos con consejo "Se puede quitar" que todavía están activos.')
+
+$script:pvSplit = New-Object System.Windows.Forms.SplitContainer
+$script:pvSplit.Dock = 'Fill'
+$script:pvSplit.Orientation = 'Vertical'
+$script:pvSplit.SplitterWidth = 6
+$script:pvSplit.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 232)
+$pvLayout.Controls.Add($script:pvSplit, 0, 2)
+
+$script:grpPvList = New-Object System.Windows.Forms.GroupBox
+$script:grpPvList.Text = 'Telemetría encontrada en este equipo'
+$script:grpPvList.Dock = 'Fill'
+$script:grpPvList.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+$script:pvSplit.Panel1.Controls.Add($script:grpPvList)
+
+$script:pvList = New-Object System.Windows.Forms.ListView
+$script:pvList.Dock = 'Fill'
+$script:pvList.View = 'Details'
+$script:pvList.CheckBoxes = $true
+$script:pvList.FullRowSelect = $true
+$script:pvList.MultiSelect = $false
+$script:pvList.HideSelection = $false
+$script:pvList.ShowGroups = $true
+$script:pvList.ShowItemToolTips = $true
+$script:pvList.BorderStyle = 'FixedSingle'
+$script:pvList.Font = $script:uiFont
+[void]$script:pvList.Columns.Add('Elemento', 295)
+[void]$script:pvList.Columns.Add('Tipo', 70)
+[void]$script:pvList.Columns.Add('Estado', 105)
+[void]$script:pvList.Columns.Add('Consejo', 125)
+$script:grpPvList.Controls.Add($script:pvList)
+
+$pvRightLayout = New-Object System.Windows.Forms.TableLayoutPanel
+$pvRightLayout.Dock = 'Fill'
+$pvRightLayout.ColumnCount = 1
+$pvRightLayout.RowCount = 2
+[void]$pvRightLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 55)))
+[void]$pvRightLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 45)))
+$script:pvSplit.Panel2.Controls.Add($pvRightLayout)
+
+$grpPvDetail = New-Object System.Windows.Forms.GroupBox
+$grpPvDetail.Text = 'Detalle'
+$grpPvDetail.Dock = 'Fill'
+$grpPvDetail.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+$pvRightLayout.Controls.Add($grpPvDetail, 0, 0)
+
+$script:pvDetail = New-Object System.Windows.Forms.TextBox
+$script:pvDetail.Dock = 'Fill'
+$script:pvDetail.Multiline = $true
+$script:pvDetail.ReadOnly = $true
+$script:pvDetail.BorderStyle = 'None'
+$script:pvDetail.ScrollBars = 'Vertical'
+$script:pvDetail.TabStop = $false
+$script:pvDetail.BackColor = [System.Drawing.SystemColors]::Control
+$script:pvDetail.ForeColor = [System.Drawing.Color]::FromArgb(70, 70, 70)
+$script:pvDetail.Text = 'Selecciona un elemento para ver qué datos envía, qué se cambia exactamente y qué efectos tiene desactivarlo.'
+$grpPvDetail.Controls.Add($script:pvDetail)
+
+$grpPvLog = New-Object System.Windows.Forms.GroupBox
+$grpPvLog.Text = 'Registro'
+$grpPvLog.Dock = 'Fill'
+$grpPvLog.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 8)
+$pvRightLayout.Controls.Add($grpPvLog, 0, 1)
+
+$pvLogLayout = New-Object System.Windows.Forms.TableLayoutPanel
+$pvLogLayout.Dock = 'Fill'
+$pvLogLayout.ColumnCount = 1
+$pvLogLayout.RowCount = 2
+[void]$pvLogLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 40)))
+[void]$pvLogLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$grpPvLog.Controls.Add($pvLogLayout)
+
+$pvLogButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+$pvLogButtons.Dock = 'Fill'
+$pvLogButtons.FlowDirection = 'RightToLeft'
+$pvLogButtons.WrapContents = $false
+$pvLogLayout.Controls.Add($pvLogButtons, 0, 0)
+
+$btnPvSave = New-ActionButton 'Guardar registro'
+$pvLogButtons.Controls.Add($btnPvSave)
+
+$btnPvClear = New-ActionButton 'Limpiar'
+$pvLogButtons.Controls.Add($btnPvClear)
+
+$script:pvLog = New-LogView
+$pvLogLayout.Controls.Add($script:pvLog, 0, 1)
+
+$script:pvLoaded = $false
+$script:privSvc = @{}
+$script:privTasks = @()
+$script:pvGroupNames = @('Windows: servicios y tareas', 'Windows: ajustes de privacidad', 'Programas instalados', 'Otros detectados (revisar antes)')
+
+# Consejo de cada elemento, al estilo de la pestaña Servicios:
+#   Se puede quitar -> recomendado; no afecta al uso normal del equipo.
+#   Opcional        -> se puede quitar, pero tiene un efecto secundario.
+#   Revisar antes   -> detectado solo por su nombre; no está en el catálogo.
+function Get-PrivacyAdvice {
+    param($Item)
+    if ([string]$Item.Id -like 'gen-*') {
+        return [pscustomobject]@{ Label = 'Revisar antes'; Verdict = 'REVISAR ANTES: se ha detectado solo por su nombre. Comprueba de qué programa es antes de desactivarlo.' }
+    }
+    if ($Item.Recommended) {
+        return [pscustomobject]@{ Label = 'Se puede quitar'; Verdict = 'SE PUEDE QUITAR: solo envía datos al fabricante. Desactivarlo no afecta al uso normal del equipo.' }
+    }
+    return [pscustomobject]@{ Label = 'Opcional'; Verdict = 'OPCIONAL: se puede quitar, pero tiene un efecto secundario. Lee la explicación antes de decidir.' }
+}
+
+# Escanea el equipo y rellena la lista. Los recomendados que siguen activos
+# quedan marcados.
+function Update-PrivacyTab {
+    $script:pvLoaded = $true
+    $script:form.UseWaitCursor = $true
+    $script:btnPvScan.Enabled = $false
+    $script:statusLabel.Text = 'Buscando telemetría en el equipo...'
+    [System.Windows.Forms.Application]::DoEvents()
+    $filas = New-Object System.Collections.ArrayList
+    try {
+        Update-PrivacyCache
+        $elementos = @($script:privCatalog) + @(Get-PrivacyGenericItems)
+        foreach ($item in $elementos) {
+            $estado = Get-PrivacyItemState $item
+            if (-not $estado.Present -or @($estado.Components).Count -eq 0) { continue }
+            [void]$filas.Add([pscustomobject]@{ Item = $item; State = $estado })
+        }
+    } catch {
+        Add-TabLog $script:pvLog ('No se pudo completar el escaneo: {0}' -f $_.Exception.Message) 'ERROR'
+        Write-Diag ('ERROR escaneando la telemetría: ' + $_.Exception.ToString())
+    } finally {
+        $script:form.UseWaitCursor = $false
+        $script:btnPvScan.Enabled = $true
+        $script:statusLabel.Text = 'Listo'
+    }
+
+    $script:pvList.BeginUpdate()
+    try {
+        $script:pvList.Items.Clear()
+        $script:pvList.Groups.Clear()
+        $grupos = @{}
+        foreach ($nombre in $script:pvGroupNames) {
+            $g = New-Object System.Windows.Forms.ListViewGroup($nombre, $nombre)
+            [void]$script:pvList.Groups.Add($g)
+            $grupos[$nombre] = $g
+        }
+        foreach ($fila in $filas) {
+            $item = New-Object System.Windows.Forms.ListViewItem([string]$fila.Item.Name)
+            [void]$item.SubItems.Add([string]$fila.State.Kind)
+            $textoEstado = [string]$fila.State.Text
+            if ($fila.State.Off) { $textoEstado = [char]0x2713 + ' ' + $textoEstado }
+            [void]$item.SubItems.Add($textoEstado)
+            [void]$item.SubItems.Add((Get-PrivacyAdvice $fila.Item).Label)
+            $item.Tag = $fila
+            $item.ToolTipText = [string]$fila.Item.Description
+            if ($grupos.ContainsKey([string]$fila.Item.Group)) { $item.Group = $grupos[[string]$fila.Item.Group] }
+            if ($fila.State.Off) {
+                $item.ForeColor = [System.Drawing.Color]::FromArgb(0, 120, 0)
+            } elseif ($fila.Item.Recommended) {
+                $item.Checked = $true
+                $item.Font = $script:boldFont
+            }
+            [void]$script:pvList.Items.Add($item)
+        }
+    } finally {
+        $script:pvList.EndUpdate()
+    }
+
+    $total = $filas.Count
+    $activos = @($filas | Where-Object { -not $_.State.Off }).Count
+    $pendientes = @($filas | Where-Object { -not $_.State.Off -and $_.Item.Recommended }).Count
+    $script:grpPvList.Text = ('Telemetría encontrada en este equipo ({0} elementos)' -f $total)
+    $script:lblPvResumen.Text = ('{0} activos · {1} desactivados · {2} recomendados pendientes' -f $activos, ($total - $activos), $pendientes)
+    if ($pendientes -gt 0) { $script:lblPvResumen.ForeColor = Get-SecurityLevelColor 'WARN' } else { $script:lblPvResumen.ForeColor = Get-SecurityLevelColor 'OK' }
+    Add-TabLog $script:pvLog ('Escaneo de telemetría: {0} elementos, {1} activos, {2} recomendados pendientes.' -f $total, $activos, $pendientes) 'STEP'
+    $otros = @($filas | Where-Object { $_.Item.Id -like 'gen-*' }).Count
+    if ($otros -gt 0) {
+        Add-TabLog $script:pvLog ('{0} elemento(s) de otros programas detectados por su nombre: revísalos antes de desactivarlos.' -f $otros)
+    }
+}
+
+function Show-PrivacyDetail {
+    if ($script:pvList.SelectedItems.Count -eq 0) { return }
+    $fila = $script:pvList.SelectedItems[0].Tag
+    if (-not $fila) { return }
+    $lineas = New-Object System.Collections.ArrayList
+    [void]$lineas.Add(('{0}   [estado: {1}]' -f $fila.Item.Name, $fila.State.Text))
+    [void]$lineas.Add('')
+    [void]$lineas.Add((Get-PrivacyAdvice $fila.Item).Verdict)
+    [void]$lineas.Add('')
+    [void]$lineas.Add([string]$fila.Item.Description)
+    if ($fila.Item.Warning) {
+        [void]$lineas.Add('')
+        [void]$lineas.Add(('Aviso: {0}' -f $fila.Item.Warning))
+    }
+    [void]$lineas.Add('')
+    [void]$lineas.Add('Qué se cambia:')
+    foreach ($c in @($fila.State.Components)) {
+        $marca = ' '
+        if ($c.Off) { $marca = 'x' }
+        $extra = ''
+        if ($c.Kind -eq 'reg') { $extra = ('  ({0})' -f $c.Path) }
+        [void]$lineas.Add((' [{0}] {1}: {2}{3}' -f $marca, $c.Label, $c.StateText, $extra))
+    }
+    $notas = @()
+    if ($fila.State.NeedsAdmin) { $notas += 'Necesita permisos de administrador.' }
+    if ($notas.Count -gt 0) { [void]$lineas.Add(''); [void]$lineas.Add(($notas -join ' ')) }
+    $script:pvDetail.Text = ($lineas.ToArray() -join "`r`n")
+}
+
+function Set-PrivacyChecked {
+    param([bool]$Value, [switch]$OnlyRecommended)
+    foreach ($item in $script:pvList.Items) {
+        $fila = $item.Tag
+        if ($OnlyRecommended) {
+            $item.Checked = ($fila.Item.Recommended -and -not $fila.State.Off)
+        } else {
+            $item.Checked = $Value
+        }
+    }
+}
+
+# Desactiva o vuelve a activar los elementos marcados.
+function Invoke-PrivacyAction {
+    param([bool]$Off)
+    if ($script:busy) { return }
+    $marcados = @($script:pvList.Items | Where-Object { $_.Checked } | ForEach-Object { $_.Tag })
+    if ($Off) {
+        $marcados = @($marcados | Where-Object { -not $_.State.Off })
+    } else {
+        $marcados = @($marcados | Where-Object { @($_.State.Components | Where-Object { $_.Off }).Count -gt 0 })
+    }
+    if ($marcados.Count -eq 0) {
+        $aviso = 'Marca al menos un elemento que siga activo.'
+        if (-not $Off) { $aviso = 'Marca al menos un elemento que esté desactivado.' }
+        [void][System.Windows.Forms.MessageBox]::Show($aviso, $script:AppName, 'OK', 'Information')
+        return
+    }
+    if (@($marcados | Where-Object { $_.State.NeedsAdmin }).Count -gt 0 -and -not (Assert-Admin)) { return }
+
+    if (-not $UiSmokeTest) {
+        $nombres = @($marcados | Select-Object -First 14 | ForEach-Object { ' - ' + $_.Item.Name })
+        if ($marcados.Count -gt 14) { $nombres += (' ... y {0} más' -f ($marcados.Count - 14)) }
+        $avisos = @($marcados | Where-Object { $_.Item.Warning } | Select-Object -First 3 | ForEach-Object { ' * ' + $_.Item.Name + ': ' + $_.Item.Warning })
+        $texto = ''
+        if ($Off) {
+            $texto = ("Se va a desactivar la telemetría de {0} elemento(s):`n`n{1}" -f $marcados.Count, ($nombres -join "`n"))
+            if ($avisos.Count -gt 0) { $texto += ("`n`nTen en cuenta:`n{0}" -f ($avisos -join "`n")) }
+            $texto += "`n`nAntes se guarda una copia de los ajustes. Se puede deshacer aquí mismo con 'Volver a activar marcados'.`n`n¿Continuar?"
+        } else {
+            $texto = ("Se va a volver a activar {0} elemento(s):`n`n{1}`n`nLos servicios y tareas se habilitan de nuevo y los ajustes vuelven al valor de Windows.`n`n¿Continuar?" -f $marcados.Count, ($nombres -join "`n"))
+        }
+        $r = [System.Windows.Forms.MessageBox]::Show($texto, "$script:AppName - privacidad", 'YesNo', 'Question')
+        if ($r -ne 'Yes') { return }
+    }
+
+    $script:busy = $true
+    $script:btnPvOff.Enabled = $false
+    $script:btnPvOn.Enabled = $false
+    $script:form.UseWaitCursor = $true
+    $okCount = 0
+    $errCount = 0
+    try {
+        if ($Off -and $script:IsAdmin) {
+            Save-OptimizationSnapshot
+            if ($script:optSnapshotFile) {
+                Add-TabLog $script:pvLog ('Copia de los ajustes guardada antes de cambiar nada: {0}' -f (Split-Path -Leaf $script:optSnapshotFile)) 'OK'
+            }
+        }
+        $guardado = Read-PrivacySavedState
+        Add-TabLog $script:pvLog ('=== {0} {1} elemento(s) ===' -f $(if ($Off) { 'Desactivando' } else { 'Volviendo a activar' }), $marcados.Count) 'STEP'
+        foreach ($fila in $marcados) {
+            $script:statusLabel.Text = ('{0}...' -f $fila.Item.Name)
+            [System.Windows.Forms.Application]::DoEvents()
+            $fallos = 0
+            $hechos = 0
+            foreach ($c in @($fila.State.Components | Where-Object { [bool]$_.Off -ne $Off })) {
+                try {
+                    Set-PrivacyComponent -Component $c -Off $Off -Saved $guardado
+                    $hechos++
+                } catch {
+                    $fallos++
+                    Add-TabLog $script:pvLog ('{0}: {1}' -f $c.Label, $_.Exception.Message) 'ERROR'
+                    Write-Diag ('Privacidad, "{0}" / {1}: {2}' -f $fila.Item.Name, $c.Label, $_.Exception.ToString())
+                }
+            }
+            if ($fallos -eq 0) {
+                $okCount++
+                Add-TabLog $script:pvLog ('{0}: {1} ({2} cambio(s)).' -f $fila.Item.Name, $(if ($Off) { 'desactivado' } else { 'activado de nuevo' }), $hechos) 'OK'
+            } else {
+                $errCount++
+                Add-TabLog $script:pvLog ('{0}: {1} cambio(s) aplicados y {2} con error.' -f $fila.Item.Name, $hechos, $fallos) 'WARN'
+            }
+        }
+        Save-PrivacySavedState -Tabla $guardado
+    } finally {
+        $script:btnPvOff.Enabled = $true
+        $script:btnPvOn.Enabled = $true
+        $script:form.UseWaitCursor = $false
+        $script:busy = $false
+    }
+    Add-TabLog $script:pvLog ('=== Fin: {0} correctos, {1} con error ===' -f $okCount, $errCount) 'STEP'
+    if ($errCount -gt 0) {
+        Add-TabLog $script:pvLog 'Algunas tareas y servicios de Windows están protegidos y no se pueden cambiar ni siquiera como administrador. El resto queda aplicado.' 'WARN'
+    }
+    Update-PrivacyTab
+    $script:statusLabel.Text = 'Privacidad: cambios aplicados'
+}
+
+$script:pvList.add_SelectedIndexChanged({ Show-PrivacyDetail })
+$script:btnPvScan.add_Click({ if (-not $script:busy) { Update-PrivacyTab } })
+$script:btnPvOff.add_Click({ Invoke-PrivacyAction -Off $true })
+$script:btnPvOn.add_Click({ Invoke-PrivacyAction -Off $false })
+$btnPvRec.add_Click({ Set-PrivacyChecked -Value $true -OnlyRecommended })
+$btnPvNone.add_Click({ Set-PrivacyChecked -Value $false })
+$btnPvSave.add_Click({ Save-LogBox $script:pvLog 'registro_privacidad' })
+$btnPvClear.add_Click({ $script:pvLog.Clear() })
+
+Add-TabLog $script:pvLog 'Al abrir la pestaña se busca la telemetría activa en este equipo. El escaneo no cambia nada.'
+Add-TabLog $script:pvLog 'Columna Consejo: "Se puede quitar" no afecta al uso normal y ya viene marcado; "Opcional" tiene algún efecto secundario; "Revisar antes" se ha detectado solo por el nombre.'
+Add-TabLog $script:pvLog 'Chrome y Visual Studio Code no admiten este ajuste desde fuera: se desactiva en sus propias opciones.'
+
+
 # TabPages.Insert no funciona antes de que el control exista en pantalla, así
 # que el orden definitivo de las subpestañas se fija aquí con Clear + AddRange.
 function Set-SubTabOrder {
@@ -10398,7 +12293,7 @@ function Set-SubTabOrder {
 Set-SubTabOrder $script:subSistema    @($tabServices, $tabInicio, $tabDrivers)
 Set-SubTabOrder $script:subOptim      @($tabOptimize, $tabEquipo)
 Set-SubTabOrder $script:subProgramas  @($tabPrograms, $tabUninstall)
-Set-SubTabOrder $script:subProteccion @($tabSeguridad, $tabCopias)
+Set-SubTabOrder $script:subProteccion @($tabSeguridad, $tabPuertos, $tabPrivacidad, $tabCopias)
 
 # Acciones al mostrar cada subpestaña (carga perezosa y tamaño de los paneles)
 function Invoke-TabActivated {
@@ -10482,6 +12377,36 @@ function Invoke-TabActivated {
         } catch { }
         Update-BackupDestinationInfo
         Update-BackupButtons
+        return
+    }
+
+    if ($Page -eq $tabPuertos) {
+        try {
+            $script:ptSplit.Panel1MinSize = 560
+            $script:ptSplit.Panel2MinSize = 340
+            $script:ptSplit.SplitterDistance = 700
+        } catch { }
+        if (-not $script:ptLoaded) {
+            try { Update-PortsTab } catch {
+                Add-TabLog $script:ptLog ('No se pudieron leer los puertos: {0}' -f $_.Exception.Message) 'ERROR'
+                Write-Diag ('ERROR en la pestaña Puertos: ' + $_.Exception.ToString())
+            }
+        }
+        return
+    }
+
+    if ($Page -eq $tabPrivacidad) {
+        try {
+            $script:pvSplit.Panel1MinSize = 560
+            $script:pvSplit.Panel2MinSize = 340
+            $script:pvSplit.SplitterDistance = 680
+        } catch { }
+        if (-not $script:pvLoaded) {
+            try { Update-PrivacyTab } catch {
+                Add-TabLog $script:pvLog ('No se pudo buscar la telemetría: {0}' -f $_.Exception.Message) 'ERROR'
+                Write-Diag ('ERROR en la pestaña Privacidad: ' + $_.Exception.ToString())
+            }
+        }
         return
     }
 
@@ -11096,6 +13021,85 @@ if ($UiSmokeTest) {
         Write-Host "Captura de inicio: $outIni"
     } catch {
         Write-Host ('ERROR al probar la pestaña Inicio: {0}' -f $_.Exception.Message)
+    }
+
+    # Subpestaña Puertos (solo lectura; no crea reglas en el cortafuegos)
+    try {
+        Select-AppTab $tabPuertos
+        for ($i = 0; $i -lt 10; $i++) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        Write-Host ('Puertos: {0}' -f $script:lblPtResumen.Text)
+        if ($script:ptFirewall) { Write-Host ('Cortafuegos: {0} | perfiles activos: {1}' -f $script:ptFirewall.Text, ($script:ptFirewall.Active -join ', ')) }
+        Write-Host ('Reglas de entrada activas leídas: {0}' -f @(Get-FirewallInboundRules).Count)
+        foreach ($e in @($script:ptEntries | Where-Object { -not $_.Local -and $_.Proto -eq 'TCP' } | Sort-Object Port)) {
+            Write-Host ('  {0}/{1} | {2} | {3} | {4} | {5} | reglas: {6}' -f $e.Port, $e.Proto, $e.Known.Service, $e.Process, $e.Scope, $e.Level, (@($e.RuleIds) -join ', '))
+        }
+        $soloTcp = $script:ptList.Items.Count
+        $script:chkPtUdp.Checked = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $conUdp = $script:ptList.Items.Count
+        $script:chkPtNet.Checked = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $soloRed = $script:ptList.Items.Count
+        $script:chkPtNet.Checked = $false
+        $script:chkPtUdp.Checked = $false
+        [System.Windows.Forms.Application]::DoEvents()
+        Write-Host ('Filtros de puertos: solo TCP {0} | con UDP {1} | solo abiertos a la red {2}' -f $soloTcp, $conUdp, $soloRed)
+        if ($script:ptList.Items.Count -gt 0) {
+            $script:ptList.Items[0].Selected = $true
+            [System.Windows.Forms.Application]::DoEvents()
+            Write-Host ('Detalle del puerto 0: {0} caracteres | botones: bloquear {1}, quitar bloqueo {2}, ubicación {3}' -f $script:ptDetail.TextLength, $script:btnPtBlock.Enabled, $script:btnPtUnblock.Enabled, $script:btnPtOpen.Enabled)
+        }
+        Write-Host ('Split puertos: distancia {0}, panel1 {1} px, panel2 {2} px' -f $script:ptSplit.SplitterDistance, $script:ptSplit.Panel1.Width, $script:ptSplit.Panel2.Width)
+        $maxPt = 0
+        foreach ($c in $ptButtonsLeft.Controls) { $r = $c.Right + $c.Margin.Right; if ($r -gt $maxPt) { $maxPt = $r } }
+        Write-Host ('Barra de puertos: {0} px (contenido {1})' -f $ptButtonsLeft.Width, $maxPt)
+        $bmpPt = New-Object System.Drawing.Bitmap($script:form.Width, $script:form.Height)
+        $script:form.DrawToBitmap($bmpPt, (New-Object System.Drawing.Rectangle(0, 0, $script:form.Width, $script:form.Height)))
+        $outPt = Join-Path $env:TEMP 'wintaller_puertos.png'
+        $bmpPt.Save($outPt, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmpPt.Dispose()
+        Write-Host "Captura de puertos: $outPt"
+    } catch {
+        Write-Host ('ERROR al probar la pestaña Puertos: {0}' -f $_.Exception.Message)
+    }
+
+    # Subpestaña Privacidad (solo escaneo; no desactiva nada)
+    try {
+        Select-AppTab $tabPrivacidad
+        for ($i = 0; $i -lt 10; $i++) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        Write-Host ('Privacidad: {0}' -f $script:lblPvResumen.Text)
+        Write-Host ('Catálogo de telemetría: {0} elementos | presentes en este equipo: {1}' -f $script:privCatalog.Count, $script:pvList.Items.Count)
+        foreach ($it in $script:pvList.Items) {
+            Write-Host ('  [{0}] {1} | {2} | {3}{4}' -f $(if ($it.Checked) { 'x' } else { ' ' }), $it.Text, $it.SubItems[1].Text, $it.SubItems[2].Text, $(if ($it.Tag.State.NeedsAdmin) { ' | admin' } else { '' }))
+        }
+        if ($script:pvList.Items.Count -gt 0) {
+            $script:pvList.Items[0].Selected = $true
+            [System.Windows.Forms.Application]::DoEvents()
+            Write-Host ('Detalle del elemento 0: {0} caracteres' -f $script:pvDetail.TextLength)
+        }
+        $antesPv = @($script:pvList.CheckedItems).Count
+        Set-PrivacyChecked -Value $false
+        $sinMarcas = @($script:pvList.CheckedItems).Count
+        Set-PrivacyChecked -Value $true -OnlyRecommended
+        Write-Host ('Marcas de privacidad: iniciales {0} | tras quitar {1} | recomendados {2}' -f $antesPv, $sinMarcas, @($script:pvList.CheckedItems).Count)
+        Write-Host ('Split privacidad: distancia {0}, panel1 {1} px, panel2 {2} px' -f $script:pvSplit.SplitterDistance, $script:pvSplit.Panel1.Width, $script:pvSplit.Panel2.Width)
+        $maxPv = 0
+        foreach ($c in $pvButtons.Controls) { $r = $c.Right + $c.Margin.Right; if ($r -gt $maxPv) { $maxPv = $r } }
+        Write-Host ('Barra de privacidad: {0} px (contenido {1})' -f $pvButtons.Width, $maxPv)
+        $bmpPv = New-Object System.Drawing.Bitmap($script:form.Width, $script:form.Height)
+        $script:form.DrawToBitmap($bmpPv, (New-Object System.Drawing.Rectangle(0, 0, $script:form.Width, $script:form.Height)))
+        $outPv = Join-Path $env:TEMP 'wintaller_privacidad.png'
+        $bmpPv.Save($outPv, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmpPv.Dispose()
+        Write-Host "Captura de privacidad: $outPv"
+    } catch {
+        Write-Host ('ERROR al probar la pestaña Privacidad: {0}' -f $_.Exception.Message)
     }
 
     Select-AppTab $tabServices

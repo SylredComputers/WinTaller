@@ -56,6 +56,7 @@ La ventana tiene cuatro pestañas:
 ### ⚡ Optimización
 - **Limpieza y mantenimiento:** temporales, papelera, cachés (Windows Update, navegadores, miniaturas…), volcados de memoria, WinSxS, telemetría, Copilot/Recall, servicios innecesarios, TRIM/desfragmentación y reparación con DISM + SFC. Crea **punto de restauración** y guarda una copia de los ajustes para **revertir** los cambios.
 - **Rendimiento:** detecta si es **sobremesa o portátil** y muestra el **estado actual** de cada ajuste (plan de energía, hibernación, efectos visuales, Game DVR…) antes de cambiarlo. Incluye diagnóstico: salud de discos (SMART), pantallazos azules, test de memoria y un **informe HTML del equipo**.
+- **Windows más ágil** (dentro de Rendimiento): activa opciones útiles que Windows trae desactivadas, como **«Finalizar tarea» en la barra de tareas**, el menú contextual clásico, las extensiones de archivo, las rutas largas o el historial del portapapeles. Cada una se puede deshacer.
 
 ### 📦 Programas
 - **Instalar:** catálogo de 65 programas habituales (navegadores, ofimática, multimedia, utilidades, seguridad…) que se instalan en cola con **winget**, al estilo de Ninite.
@@ -63,6 +64,8 @@ La ventana tiene cuatro pestañas:
 
 ### 🛡️ Protección
 - **Seguridad:** revisión del equipo (antivirus, firewall, UAC, SMBv1, BitLocker, arranque seguro, actualizaciones, cuentas, programas de inicio sin firma) y análisis con **Microsoft Defender**: rápido, completo, de una carpeta o USB y sin conexión.
+- **Puertos:** escanea los **puertos abiertos** del equipo, indica qué programa los usa (con su firma digital), si el cortafuegos deja entrar conexiones y cuáles conviene revisar. Permite bloquear un puerto y quitar el bloqueo. Detecta cortafuegos de terceros como TinyWall.
+- **Privacidad:** busca la **telemetría** de Windows y de los programas instalados (Office, Edge, Firefox, Visual Studio, .NET, NVIDIA, Intel, HP, Dell…) y la desactiva. Todo se puede volver a activar.
 - **Copias:** copia de carpetas con **robocopy** (con verificación) o **imagen completa del sistema** con wbadmin.
 
 Todas las acciones piden confirmación y quedan anotadas en un registro que se puede guardar.

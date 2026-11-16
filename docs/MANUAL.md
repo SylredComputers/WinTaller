@@ -14,6 +14,9 @@ Herramienta gráfica para Windows 10/11 que permite:
 - **Hacer copias de seguridad**: copiar carpetas concretas a otra unidad o crear una **imagen completa del sistema** para restaurar Windows si algo falla.
 - **Revisar la seguridad y analizar el equipo con Microsoft Defender**: estado del antivirus, análisis rápido, completo, de una carpeta o USB y sin conexión, y lista de amenazas.
 - **Ver y deshabilitar los programas que arrancan con Windows**, con su firma digital.
+- **Escanear los puertos abiertos** del equipo: qué programa los usa, si el cortafuegos deja entrar conexiones y cuáles conviene revisar o bloquear.
+- **Buscar y desactivar la telemetría** de Windows y de los programas instalados (y volver a activarla).
+- **Activar opciones útiles que Windows trae desactivadas**, como *Finalizar tarea* en la barra de tareas.
 - Guardar un **registro de actividad** de todo lo que se hace.
 
 No requiere instalación ni dependencias externas: usa PowerShell 5.1 y WinForms, incluidos en Windows. La pestaña **Programas** utiliza **winget**, que ya viene en Windows 10/11 (si falta, la propia herramienta te lleva a la Store para instalarlo). Las pestañas **Drivers** y **Copias** usan herramientas del propio Windows: **Windows Update**, **robocopy** y **wbadmin**.
@@ -29,7 +32,7 @@ Desde la versión 2.0 hay **4 pestañas principales**, cada una con sus subpesta
 | **Sistema** | Servicios · Inicio · Drivers |
 | **Optimización** | Limpieza y mantenimiento · Rendimiento |
 | **Programas** | Instalar · Desinstalar |
-| **Protección** | Seguridad · Copias |
+| **Protección** | Seguridad · Puertos · Privacidad · Copias |
 
 ---
 
@@ -218,7 +221,7 @@ Detalles:
 
 ## Optimización › Rendimiento (ajustes según el equipo y diagnóstico)
 
-Al abrirla detecta el equipo (sobremesa o portátil, tipo de disco, RAM, CPU, gráfica y batería) y muestra los ajustes que tienen sentido para él, agrupados en **Energía**, **Rendimiento y aspecto**, **Disco** y **Juegos**.
+Al abrirla detecta el equipo (sobremesa o portátil, tipo de disco, RAM, CPU, gráfica y batería) y muestra los ajustes que tienen sentido para él, agrupados en **Energía**, **Rendimiento y aspecto**, **Windows más ágil**, **Disco** y **Juegos**.
 
 Cada ajuste tiene tres columnas:
 
@@ -247,6 +250,21 @@ Cada ajuste tiene tres columnas:
 | **Activar TRIM** (solo SSD) | Recomendado | Recomendado |
 | **Activar modo juego** | Recomendado | Recomendado |
 | **Desactivar Game DVR** | Recomendado | Recomendado |
+
+### Windows más ágil (desde la 2.1.0)
+
+Opciones útiles que Windows trae desactivadas. A diferencia del resto, estos ajustes tienen botón **Deshacer**: selecciona uno ya aplicado y vuelve al valor de fábrica de Windows.
+
+| Ajuste | Qué hace | Recomendado |
+|---|---|---|
+| **«Finalizar tarea» en la barra de tareas** | Botón derecho sobre un programa de la barra › *Finalizar tarea*. Cierra un programa colgado sin abrir el Administrador de tareas. Solo Windows 11 23H2 o posterior. | Sí |
+| **Menú contextual clásico** | El botón derecho muestra el menú completo, sin «Mostrar más opciones». Solo Windows 11. | Opcional |
+| **Mostrar las extensiones de los archivos** | Deja a la vista los `factura.pdf.exe`. | Sí |
+| **Abrir el Explorador en «Este equipo»** | Evita la carga de Inicio / Acceso rápido. | Opcional |
+| **Historial del portapapeles (Win+V)** | Pegar cualquiera de las últimas cosas copiadas. Ojo: también guarda lo copiado de un gestor de contraseñas. | Opcional |
+| **Rutas largas (más de 260 caracteres)** | Evita errores al copiar o descomprimir carpetas muy anidadas. Necesita administrador. | Sí |
+| **Cerrar antes los programas colgados al apagar** | Windows no se queda esperando en «Esta aplicación impide el apagado». Un programa con cambios sin guardar se cierra sin preguntar. | Opcional |
+| **Mensajes detallados al arrancar y al apagar** | Muestra qué hace Windows en cada paso; útil para ver qué retrasa el arranque. Necesita administrador. | Opcional |
 
 ### Diagnóstico (no cambia nada)
 
@@ -397,6 +415,52 @@ Detalles:
 
 ---
 
+## Protección › Puertos (puertos abiertos en el equipo)
+
+Al abrirla escanea los puertos **a la escucha** en este equipo. El escaneo solo lee: no envía tráfico ni cambia nada.
+
+Para cada puerto muestra el **servicio** habitual (SMB, Escritorio remoto, base de datos…), el **programa** que lo abre (con sus servicios de Windows y su firma digital) y el **alcance**:
+
+| Grupo | Significado |
+|---|---|
+| **Abiertos a la red** | Otros equipos pueden conectarse: hay una regla de entrada en el cortafuegos que lo permite, o el cortafuegos no está filtrando. |
+| **A la escucha, pero el cortafuegos no deja entrar** | El programa escucha, pero no hay regla de entrada (o hay un bloqueo). |
+| **Solo este equipo** | Escucha en `127.0.0.1` / `::1`. Es comunicación interna entre programas. |
+
+La columna **Valoración** combina el riesgo del puerto con su alcance: *Revisar ya* (rojo) para puertos delicados abiertos a la red —Escritorio remoto, FTP, Telnet, VNC, SMB en red pública…—, *Revisar* (naranja), *Informativo* y *Correcto*. Un programa **sin firma digital** abierto a la red se marca siempre para revisar.
+
+- **Bloquear puerto** crea una regla de entrada en el cortafuegos de Windows (grupo *WinTaller*) que impide a otros equipos conectarse a ese puerto. **Quitar bloqueo** la elimina. Necesita administrador.
+- **Incluir UDP** añade los puertos UDP (suelen ser muchos y de uso interno). **Solo abiertos a la red** oculta el resto.
+- **Cortafuegos** abre el cortafuegos de Windows con seguridad avanzada.
+- **Otro cortafuegos instalado (TinyWall y similares):** estos programas dejan en el cortafuegos de Windows una regla general que lo permite todo y filtran por su cuenta. WinTaller lo detecta y agrupa los puertos de red como *Lo decide TinyWall*: muestra qué programa escucha, pero no puede leer las excepciones de ese cortafuegos. *Bloquear puerto* sigue funcionando.
+
+- **Si usas otro cortafuegos** (TinyWall y similares), este deja una regla general «permitir todo» en el de Windows y filtra por su cuenta. WinTaller lo detecta, agrupa esos puertos como *lo filtra otro cortafuegos* y no los valora como abiertos: hay que comprobarlos en las excepciones de ese cortafuegos. *Bloquear puerto* sigue funcionando.
+
+> La valoración del cortafuegos es orientativa: se calcula con las reglas de entrada del cortafuegos de Windows para el perfil de red activo. No tiene en cuenta el router ni otros cortafuegos instalados, y no sustituye a un escaneo desde fuera (por ejemplo con Nmap desde otro equipo).
+
+---
+
+## Protección › Privacidad (telemetría de Windows y de los programas)
+
+**Escanear telemetría** busca en este equipo lo que envía datos de uso al fabricante y lo agrupa en:
+
+| Grupo | Qué incluye |
+|---|---|
+| **Windows: servicios y tareas** | DiagTrack, dmwappushservice, tareas del Programa de mejora (CEIP), de compatibilidad (Appraiser), de comentarios y del diagnóstico de disco, e informe de errores. |
+| **Windows: ajustes de privacidad** | Nivel de datos de diagnóstico (directiva), Id. de publicidad, experiencias personalizadas, encuestas, historial de actividad, personalización de escritura y seguimiento de aplicaciones. |
+| **Programas instalados** | Solo aparecen los que existen en el equipo: Microsoft Office, Edge, Firefox, Visual Studio, SDK de .NET, PowerShell 7, NVIDIA, Intel, HP y Dell. |
+| **Otros detectados (revisar antes)** | Servicios y tareas de cualquier otro programa cuyo nombre indica telemetría (*telemetry*, *CEIP*, *analytics*, *feedback*, *usage report*…). Salen sin marcar: comprueba qué son antes de desactivarlos. |
+
+- Los **recomendados que siguen activos** quedan marcados. **Desactivar marcados** guarda antes una copia de los ajustes y aplica los cambios; la columna *Estado* muestra cómo queda.
+- **Volver a activar marcados** lo deshace: habilita servicios y tareas (con su tipo de inicio original, que se anota en `C:\ProgramData\WinTaller\privacidad.json`) y devuelve los ajustes al valor de Windows.
+- La ficha de cada elemento detalla **qué se cambia exactamente** (servicio, tarea, valor del registro o variable de entorno) y sus efectos secundarios.
+- Las directivas de Edge y Firefox hacen que el navegador muestre «administrado por tu organización»; por eso no vienen marcadas.
+- En Windows Home y Pro el nivel mínimo de diagnóstico son los *datos obligatorios*: el envío cero solo existe en Enterprise y Education.
+- **Chrome** y **Visual Studio Code** no admiten este ajuste desde fuera en equipos domésticos: se desactiva en sus propias opciones.
+- Windows Update puede volver a activar algunas tareas tras una actualización grande; basta con escanear de nuevo.
+
+---
+
 ## Seguridad y limitaciones
 
 - El programa **no puede detener ni deshabilitar servicios críticos** (RPC, DCOM, seguridad, red, audio, etc.). Se listan en `$script:CriticalServices` dentro del script.
@@ -406,6 +470,9 @@ Detalles:
 - La pestaña **Programas** descarga software real de Internet: los paquetes de winget y, en el caso de TinyWall, su instalador `.msi` desde la web oficial. Antes de empezar muestra un aviso con los programas seleccionados para que confirmes. Comprueba los nombres y revisa la columna **Estado** para ver cuáles fallaron.
 - La pestaña **Drivers** descarga e instala controladores reales desde Windows Update. Instalar un driver incorrecto puede provocar que un componente deje de funcionar; antes de cambiar algo, usa **Copia de drivers** para guardar los actuales. Algunos drivers requieren reiniciar y no se pueden desinstalar desde la herramienta: se haría desde el Administrador de dispositivos.
 - La pestaña **Copias** escribe en el disco de destino. La copia de carpetas **no borra nada en el origen**, pero sí puede sobrescribir archivos con el mismo nombre en el destino; elige una carpeta vacía o específica. La imagen del sistema **necesita administrador**, otra unidad NTFS y espacio libre; se crea con `wbadmin` y no se puede cancelar de forma limpia a mitad, así que no la interrumpas. Una copia en el mismo disco físico que el original no protege frente a un fallo del disco.
+- La pestaña **Puertos** valora el cortafuegos de forma orientativa (reglas de entrada de Windows para el perfil de red activo); no ve el router ni otros cortafuegos. **Bloquear puerto** crea reglas en el grupo *WinTaller* del cortafuegos de Windows.
+- La pestaña **Privacidad** cambia servicios, tareas programadas, directivas del registro y variables de entorno. Todo se puede volver a activar desde la propia pestaña. Los elementos del grupo *Otros detectados* se identifican solo por su nombre: revísalos antes de desactivarlos.
+- Los ajustes de usuario (`HKCU`) se aplican a la cuenta con la que se elevó el programa: si un usuario estándar eleva con la cuenta de otro administrador, se aplican al perfil de ese administrador.
 - Se necesita PowerShell 5.1 (Windows 10/11). En Windows 7 faltan algunos comandos; las tareas afectadas se omiten con un aviso.
 - Es un script sin firma digital: algunos antivirus pueden marcarlo como sospechoso. Es código abierto y legible en `WinTaller.ps1`.
 - Ejecutar desde una memoria USB funciona, siempre que la ruta sea accesible.
