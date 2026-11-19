@@ -4125,7 +4125,7 @@ $infoPanel.Dock = 'Fill'
 $infoPanel.ColumnCount = 2
 $infoPanel.RowCount = 1
 [void]$infoPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
-[void]$infoPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 270)))
+[void]$infoPanel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$infoPanel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 $infoPanel.Padding = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
 $optLayout.Controls.Add($infoPanel, 0, 0)
@@ -4142,6 +4142,8 @@ $infoPanel.Controls.Add($script:lblSystemInfo, 0, 0)
 
 $infoButtons = New-Object System.Windows.Forms.FlowLayoutPanel
 $infoButtons.Dock = 'Fill'
+$infoButtons.AutoSize = $true
+$infoButtons.AutoSizeMode = 'GrowAndShrink'
 $infoButtons.FlowDirection = 'RightToLeft'
 $infoButtons.WrapContents = $false
 $infoButtons.Padding = New-Object System.Windows.Forms.Padding(0, 1, 0, 0)
