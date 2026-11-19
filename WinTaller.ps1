@@ -369,6 +369,8 @@ function New-WinTallerRestorePoint {
 
     $frecuenciaAnterior = $null
     $frecuenciaCambiada = $false
+    # Checkpoint-Computer pinta una barra de progreso en la consola.
+    $ProgressPreference = 'SilentlyContinue'
     try {
         if (Test-Path $srKey) {
             $frecuenciaAnterior = (Get-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
@@ -5941,8 +5943,8 @@ $uninstToolbar = New-Object System.Windows.Forms.TableLayoutPanel
 $uninstToolbar.Dock = 'Fill'
 $uninstToolbar.ColumnCount = 2
 $uninstToolbar.RowCount = 1
-[void]$uninstToolbar.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 57)))
-[void]$uninstToolbar.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 43)))
+[void]$uninstToolbar.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$uninstToolbar.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $uninstLayout.Controls.Add($uninstToolbar, 0, 1)
 
 $uninstLeft = New-Object System.Windows.Forms.TableLayoutPanel
@@ -5994,6 +5996,8 @@ $uninstLeft.Controls.Add($script:btnUninstDanger, 4, 0)
 
 $uninstRight = New-Object System.Windows.Forms.FlowLayoutPanel
 $uninstRight.Dock = 'Fill'
+$uninstRight.AutoSize = $true
+$uninstRight.AutoSizeMode = 'GrowAndShrink'
 $uninstRight.WrapContents = $false
 $uninstRight.FlowDirection = 'RightToLeft'
 $uninstRight.Padding = New-Object System.Windows.Forms.Padding(0, 0, 0, 0)
@@ -6012,9 +6016,6 @@ $uninstRight.Controls.Add($script:btnUninstAll)
 
 $script:btnUninstRefresh = New-ActionButton 'Actualizar lista'
 $uninstRight.Controls.Add($script:btnUninstRefresh)
-
-$script:btnUninstQuarantine = New-ActionButton 'Cuarentena'
-$uninstRight.Controls.Add($script:btnUninstQuarantine)
 
 $script:uninstSplit = New-Object System.Windows.Forms.SplitContainer
 $script:uninstSplit.Dock = 'Fill'
@@ -6084,6 +6085,9 @@ $uninstLogButtons.Controls.Add($btnUninstSave)
 
 $btnUninstClear = New-ActionButton 'Limpiar'
 $uninstLogButtons.Controls.Add($btnUninstClear)
+
+$script:btnUninstQuarantine = New-ActionButton 'Cuarentena' ([System.Drawing.Color]::FromArgb(225, 238, 252)) ([System.Drawing.Color]::FromArgb(0, 70, 140))
+$uninstLogButtons.Controls.Add($script:btnUninstQuarantine)
 
 $script:uninstLog = New-LogView
 $uninstRightLayout.Controls.Add($script:uninstLog, 0, 2)
