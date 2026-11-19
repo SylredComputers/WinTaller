@@ -1,5 +1,14 @@
 # Historial de cambios
 
+## Sin publicar
+
+**Seguridad**
+- Módulo común de seguridad: punto de restauración verificado (`New-WinTallerRestorePoint`), copia de claves del registro antes de borrarlas y cuarentena en `C:\ProgramData\WinTaller\cuarentena` (carpetas, archivos y claves) con restauración a su ruta original. Nunca se mueven ni borran rutas o claves protegidas del sistema.
+- Desinstalar: crea un punto de restauración antes de empezar y pide confirmación si no se puede verificar.
+
+**Correcciones**
+- Desinstalar: se espera a los procesos hijo del desinstalador (NSIS, Inno Setup…). Antes, los que se copian a TEMP y salen enseguida se daban por terminados mientras seguían trabajando. Al detener la cola también se cierran esos procesos.
+
 ## v2.1.2
 
 Segunda tanda de correcciones de la auditoría de seguridad.

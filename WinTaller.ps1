@@ -335,6 +335,499 @@ function Get-WorkDir {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Seguridad común: punto de restauración, copia de claves y cuarentena
+# ---------------------------------------------------------------------------
+# Lo usan Optimización y Desinstalar (y las herramientas de limpieza que
+# borren carpetas o claves). Las funciones no escriben en ningún registro de
+# la interfaz: devuelven el resultado y cada pestaña lo muestra a su manera.
+
+# Crea un punto de restauración y comprueba que Windows lo ha creado de verdad.
+# Quita temporalmente el límite de un punto cada 24 h y lo deja como estaba.
+# Devuelve: Verified (bool), Description y Messages (lista de Level/Text).
+function New-WinTallerRestorePoint {
+    param(
+        [string]$Description = 'Antes de WinTaller',
+        [ValidateSet('MODIFY_SETTINGS', 'APPLICATION_INSTALL', 'APPLICATION_UNINSTALL')]
+        [string]$Type = 'MODIFY_SETTINGS'
+    )
+    $mensajes = New-Object System.Collections.Generic.List[object]
+    $resultado = [pscustomobject]@{ Verified = $false; Description = ''; Messages = $mensajes }
+    $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+
+    if (-not $script:IsAdmin) {
+        [void]$mensajes.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Hacen falta permisos de administrador para crear un punto de restauración.' })
+        return $resultado
+    }
+
+    $antes = 0
+    try {
+        $puntosAntes = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber)
+        if ($puntosAntes.Count -gt 0) { $antes = [int]$puntosAntes[-1].SequenceNumber }
+    } catch { }
+    try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop } catch { Write-Diag ('Punto de restauración: Enable-ComputerRestore: ' + $_.Exception.Message) }
+
+    $frecuenciaAnterior = $null
+    $frecuenciaCambiada = $false
+    try {
+        if (Test-Path $srKey) {
+            $frecuenciaAnterior = (Get-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
+            New-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+            $frecuenciaCambiada = $true
+        }
+        Checkpoint-Computer -Description $Description -RestorePointType $Type -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        $puntosDespues = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber)
+        if ($puntosDespues.Count -gt 0 -and [int]$puntosDespues[-1].SequenceNumber -ne $antes) {
+            $resultado.Verified = $true
+            $resultado.Description = [string]$puntosDespues[-1].Description
+            [void]$mensajes.Add([pscustomobject]@{ Level = 'OK'; Text = ('Punto de restauración creado y verificado: {0}' -f $resultado.Description) })
+        } else {
+            [void]$mensajes.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Windows no ha creado un punto nuevo. No des por hecho que existe una copia de seguridad.' })
+            [void]$mensajes.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Abre "Crear un punto de restauración" y comprueba que la protección del sistema está activada en la unidad C:.' })
+        }
+    } catch {
+        [void]$mensajes.Add([pscustomobject]@{ Level = 'WARN'; Text = ('No se pudo crear el punto de restauración: {0}' -f $_.Exception.Message) })
+        [void]$mensajes.Add([pscustomobject]@{ Level = 'WARN'; Text = 'Puede que la protección del sistema esté desactivada en la unidad del sistema.' })
+    } finally {
+        if ($frecuenciaCambiada) {
+            try {
+                if ($null -eq $frecuenciaAnterior) {
+                    Remove-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction Stop
+                } else {
+                    Set-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value ([int]$frecuenciaAnterior) -ErrorAction Stop
+                }
+            } catch {
+                [void]$mensajes.Add([pscustomobject]@{ Level = 'WARN'; Text = ('No se pudo devolver a su valor el límite de un punto de restauración cada 24 h: {0}' -f $_.Exception.Message) })
+            }
+        }
+    }
+    Write-Diag ('Punto de restauración ({0}): verificado={1}' -f $Description, $resultado.Verified)
+    return $resultado
+}
+
+# --- Registro ---------------------------------------------------------------
+
+# Normaliza una ruta de registro a la forma de reg.exe (HKEY_LOCAL_MACHINE\...).
+# Solo admite HKLM y HKCU; cualquier otra rama devuelve $null.
+function ConvertTo-RegNativePath {
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    $p = $Path.Trim().TrimEnd('\') -replace '^Registry::', ''
+    $p = $p -replace '^(?i)HKLM:?\\', 'HKEY_LOCAL_MACHINE\' -replace '^(?i)HKCU:?\\', 'HKEY_CURRENT_USER\'
+    if ($p -notmatch '^(?i)HKEY_(LOCAL_MACHINE|CURRENT_USER)\\') { return $null }
+    if ($p -match '(^|\\)\.\.?(\\|$)' -or $p -match '[\*\?]') { return $null }
+    return $p
+}
+
+function ConvertTo-RegProviderPath {
+    param([string]$NativePath)
+    return ($NativePath -replace '^(?i)HKEY_LOCAL_MACHINE\\', 'HKLM:\' -replace '^(?i)HKEY_CURRENT_USER\\', 'HKCU:\')
+}
+
+# Claves que nunca se borran ni ellas ni ninguna clave que las contenga.
+$script:ProtectedRegistryKeys = @(
+    'HKEY_LOCAL_MACHINE\SOFTWARE',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Classes',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Clients',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Policies',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\RegisteredApplications',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Classes',
+    'HKEY_CURRENT_USER\Software',
+    'HKEY_CURRENT_USER\Software\Classes',
+    'HKEY_CURRENT_USER\Software\Policies',
+    'HKEY_CURRENT_USER\Software\Microsoft',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\RunOnce',
+    'HKEY_CURRENT_USER\Software\WOW6432Node'
+)
+
+# Ramas que no se tocan en ningún caso (ni sus subclaves).
+$script:ForbiddenRegistryTrees = @(
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows NT',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography',
+    'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Defender',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows NT',
+    'HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Policies'
+)
+
+# Indica si una clave se puede mandar a la cuarentena. Solo se admiten claves
+# dentro de HKLM\SOFTWARE y HKCU\Software, nunca las protegidas ni sus padres.
+function Test-RegistryKeyRemovable {
+    param([string]$Path)
+    $nativa = ConvertTo-RegNativePath $Path
+    if (-not $nativa) { return $false }
+    $mayus = $nativa.ToUpperInvariant()
+    if (-not ($mayus.StartsWith('HKEY_LOCAL_MACHINE\SOFTWARE\') -or $mayus.StartsWith('HKEY_CURRENT_USER\SOFTWARE\'))) { return $false }
+    foreach ($p in $script:ProtectedRegistryKeys) {
+        $pm = $p.ToUpperInvariant()
+        if ($mayus -eq $pm -or $pm.StartsWith($mayus + '\')) { return $false }
+    }
+    foreach ($r in $script:ForbiddenRegistryTrees) {
+        $rm = $r.ToUpperInvariant()
+        if ($mayus -eq $rm -or $mayus.StartsWith($rm + '\')) { return $false }
+    }
+    return $true
+}
+
+# Exporta una clave a un .reg con reg.exe. Devuelve la ruta del archivo o lanza
+# una excepción si la copia no se ha podido hacer.
+function Backup-RegistryKey {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    $nativa = ConvertTo-RegNativePath $Path
+    if (-not $nativa) { throw ('ruta de registro no admitida: {0}' -f $Path) }
+    if (-not (Test-Path -LiteralPath (ConvertTo-RegProviderPath $nativa))) { throw ('la clave no existe: {0}' -f $nativa) }
+    & "$env:SystemRoot\System32\reg.exe" export $nativa $Destination /y 2>&1 | Out-Null
+    $codigo = $LASTEXITCODE
+    if ($codigo -ne 0 -or -not (Test-Path -LiteralPath $Destination) -or (Get-Item -LiteralPath $Destination).Length -lt 10) {
+        throw ('reg.exe no pudo exportar {0} (código {1})' -f $nativa, $codigo)
+    }
+    return $Destination
+}
+
+# Comprueba que un .reg solo contiene la clave indicada y sus subclaves.
+function Test-RegFileScope {
+    param([string]$File, [string]$RootKey)
+    try {
+        $raiz = (ConvertTo-RegNativePath $RootKey).ToUpperInvariant()
+        if (-not $raiz) { return $false }
+        $hayClave = $false
+        foreach ($linea in [System.IO.File]::ReadAllLines($File)) {
+            $t = $linea.Trim()
+            if ($t -match '^\[(-?)(.+)\]$') {
+                if ($Matches[1] -eq '-') { return $false }
+                $clave = $Matches[2].ToUpperInvariant()
+                if ($clave -ne $raiz -and -not $clave.StartsWith($raiz + '\')) { return $false }
+                $hayClave = $true
+            }
+        }
+        return $hayClave
+    } catch {
+        return $false
+    }
+}
+
+# --- Cuarentena -------------------------------------------------------------
+# ProgramData\WinTaller\cuarentena\<id>\
+#     elemento.json   qué era, de dónde salió, cuándo y por qué
+#     datos\...       la carpeta o el archivo movidos (mismo volumen)
+#     clave.reg       la clave exportada antes de borrarla
+# Solo se restaura a la ruta original anotada en elemento.json, que está en la
+# carpeta protegida (SYSTEM y Administradores).
+
+function Get-QuarantineRoot {
+    [void](Get-SecureDataRoot)
+    return (Initialize-SecureDirectory -Path (Join-Path $env:ProgramData 'WinTaller\cuarentena'))
+}
+
+function New-QuarantineSlot {
+    $raiz = Get-QuarantineRoot
+    $id = '{0}_{1}' -f (Get-Date -Format 'yyyyMMdd_HHmmss'), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+    $dir = Join-Path $raiz $id
+    [void][System.IO.Directory]::CreateDirectory($dir)
+    return [pscustomobject]@{ Id = $id; Dir = $dir }
+}
+
+function Save-QuarantineManifest {
+    param([string]$Dir, $Data)
+    $json = $Data | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText((Join-Path $Dir 'elemento.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# Rutas del sistema de archivos que nunca se mandan a la cuarentena.
+function Get-ProtectedFileSystemPaths {
+    $lista = @(
+        $env:SystemDrive + '\',
+        $env:SystemRoot,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        $env:ProgramW6432,
+        $env:ProgramData,
+        $env:CommonProgramFiles,
+        ${env:CommonProgramFiles(x86)},
+        $env:PUBLIC,
+        $env:USERPROFILE,
+        $env:APPDATA,
+        $env:LOCALAPPDATA,
+        (Join-Path $env:USERPROFILE 'AppData'),
+        (Join-Path $env:USERPROFILE 'AppData\LocalLow'),
+        (Join-Path $env:SystemDrive 'Users'),
+        (Join-Path $env:ProgramData 'Microsoft'),
+        (Join-Path $env:ProgramData 'WinTaller'),
+        (Join-Path $env:LOCALAPPDATA 'Microsoft'),
+        (Join-Path $env:APPDATA 'Microsoft'),
+        (Join-Path $env:LOCALAPPDATA 'Packages'),
+        (Join-Path $env:LOCALAPPDATA 'Temp')
+    )
+    foreach ($especial in @('Desktop', 'MyDocuments', 'MyPictures', 'MyMusic', 'MyVideos', 'Favorites', 'StartMenu', 'Programs', 'CommonStartMenu', 'CommonPrograms', 'Startup', 'CommonStartup')) {
+        try { $lista += [Environment]::GetFolderPath($especial) } catch { }
+    }
+    $lista += (Join-Path $env:USERPROFILE 'Downloads')
+    $lista += (Join-Path $env:USERPROFILE 'OneDrive')
+    return @($lista | Where-Object { $_ } | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') } | Select-Object -Unique)
+}
+
+# Indica si una carpeta o un archivo se puede mandar a la cuarentena.
+function Test-FileSystemPathRemovable {
+    param([string]$Path)
+    try {
+        if (-not $Path -or -not [System.IO.Path]::IsPathRooted($Path)) { return $false }
+        if ($Path.StartsWith('\\')) { return $false }
+        $completo = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+        if ($completo.Length -le 3) { return $false }
+        foreach ($p in (Get-ProtectedFileSystemPaths)) {
+            if ($completo -ieq $p) { return $false }
+            # Nunca algo que contenga una carpeta protegida.
+            if ($p.StartsWith($completo + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        }
+        $win = [System.IO.Path]::GetFullPath($env:SystemRoot).TrimEnd('\')
+        if ($completo.StartsWith($win + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $wt = [System.IO.Path]::GetFullPath((Join-Path $env:ProgramData 'WinTaller')).TrimEnd('\')
+        if ($completo.StartsWith($wt + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if ($script:BaseDir) {
+            $propio = [System.IO.Path]::GetFullPath($script:BaseDir).TrimEnd('\')
+            if ($completo -ieq $propio -or $propio.StartsWith($completo + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# Mueve una carpeta o un archivo a la cuarentena. Solo dentro del mismo volumen
+# (un movimiento real, sin copiar). Devuelve el Id del elemento.
+function Move-ToQuarantine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Reason = '',
+        [string]$Program = ''
+    )
+    if (-not $script:IsAdmin) { throw 'hacen falta permisos de administrador' }
+    if (-not (Test-FileSystemPathRemovable $Path)) { throw ('ruta protegida, no se mueve: {0}' -f $Path) }
+    $completo = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $item = Get-Item -LiteralPath $completo -Force -ErrorAction Stop
+    $reparse = [System.IO.FileAttributes]::ReparsePoint
+    if (($item.Attributes -band $reparse) -eq $reparse) { throw ('es un enlace (junction o symlink), no se mueve: {0}' -f $completo) }
+
+    $raiz = Get-QuarantineRoot
+    if ([System.IO.Path]::GetPathRoot($completo) -ine [System.IO.Path]::GetPathRoot($raiz)) {
+        throw ('está en otra unidad ({0}); solo se mueve a la cuarentena lo que está en {1}' -f [System.IO.Path]::GetPathRoot($completo), [System.IO.Path]::GetPathRoot($raiz))
+    }
+
+    $slot = New-QuarantineSlot
+    $datos = Join-Path $slot.Dir 'datos'
+    [void][System.IO.Directory]::CreateDirectory($datos)
+    $destino = Join-Path $datos $item.Name
+    $tipo = 'Archivo'
+    if ($item.PSIsContainer) { $tipo = 'Carpeta' }
+    try {
+        if ($item.PSIsContainer) {
+            [System.IO.Directory]::Move($completo, $destino)
+        } else {
+            [System.IO.File]::Move($completo, $destino)
+        }
+    } catch {
+        try { [System.IO.Directory]::Delete($slot.Dir, $true) } catch { }
+        throw ('no se pudo mover {0}: {1}' -f $completo, $_.Exception.Message)
+    }
+    Save-QuarantineManifest -Dir $slot.Dir -Data ([ordered]@{
+        Id       = $slot.Id
+        Fecha    = (Get-Date).ToString('s')
+        Tipo     = $tipo
+        Origen   = $completo
+        Contenido = ('datos\' + $item.Name)
+        Programa = $Program
+        Motivo   = $Reason
+        Usuario  = [Environment]::UserName
+    })
+    Write-Diag ('Cuarentena {0}: {1} {2}' -f $slot.Id, $tipo, $completo)
+    return $slot.Id
+}
+
+# Exporta una clave a la cuarentena y después la borra. Si la copia falla, no
+# se borra nada. Devuelve el Id del elemento.
+function Remove-RegistryKeyToQuarantine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Reason = '',
+        [string]$Program = ''
+    )
+    if (-not $script:IsAdmin) { throw 'hacen falta permisos de administrador' }
+    if (-not (Test-RegistryKeyRemovable $Path)) { throw ('clave protegida, no se borra: {0}' -f $Path) }
+    $nativa = ConvertTo-RegNativePath $Path
+    $proveedor = ConvertTo-RegProviderPath $nativa
+    if (-not (Test-Path -LiteralPath $proveedor)) { throw ('la clave no existe: {0}' -f $nativa) }
+
+    $slot = New-QuarantineSlot
+    $archivo = Join-Path $slot.Dir 'clave.reg'
+    try {
+        [void](Backup-RegistryKey -Path $nativa -Destination $archivo)
+        if (-not (Test-RegFileScope -File $archivo -RootKey $nativa)) { throw 'la copia exportada no coincide con la clave' }
+    } catch {
+        try { [System.IO.Directory]::Delete($slot.Dir, $true) } catch { }
+        throw ('no se hizo la copia de {0}, no se borra: {1}' -f $nativa, $_.Exception.Message)
+    }
+    Save-QuarantineManifest -Dir $slot.Dir -Data ([ordered]@{
+        Id        = $slot.Id
+        Fecha     = (Get-Date).ToString('s')
+        Tipo      = 'Registro'
+        Origen    = $nativa
+        Contenido = 'clave.reg'
+        Programa  = $Program
+        Motivo    = $Reason
+        Usuario   = [Environment]::UserName
+    })
+    try {
+        Remove-Item -LiteralPath $proveedor -Recurse -Force -ErrorAction Stop
+    } catch {
+        Write-Diag ('Cuarentena {0}: la copia está hecha pero no se pudo borrar {1}: {2}' -f $slot.Id, $nativa, $_.Exception.Message)
+        throw ('copia guardada, pero no se pudo borrar {0}: {1}' -f $nativa, $_.Exception.Message)
+    }
+    Write-Diag ('Cuarentena {0}: clave {1}' -f $slot.Id, $nativa)
+    return $slot.Id
+}
+
+# Lista los elementos de la cuarentena (los más recientes primero).
+function Get-QuarantineItems {
+    $raiz = $null
+    try { $raiz = Get-QuarantineRoot } catch { return @() }
+    $lista = New-Object System.Collections.Generic.List[object]
+    foreach ($dir in @(Get-ChildItem -LiteralPath $raiz -Directory -Force -ErrorAction SilentlyContinue)) {
+        $manifiesto = Join-Path $dir.FullName 'elemento.json'
+        if (-not (Test-Path -LiteralPath $manifiesto)) { continue }
+        try {
+            $d = [System.IO.File]::ReadAllText($manifiesto) | ConvertFrom-Json
+            if ([string]$d.Id -ne $dir.Name) { continue }
+            [void]$lista.Add([pscustomobject]@{
+                Id       = [string]$d.Id
+                Fecha    = [string]$d.Fecha
+                Tipo     = [string]$d.Tipo
+                Origen   = [string]$d.Origen
+                Programa = [string]$d.Programa
+                Motivo   = [string]$d.Motivo
+                Dir      = $dir.FullName
+                Contenido = [string]$d.Contenido
+            })
+        } catch { Write-Diag ('Cuarentena: manifiesto no válido en {0}' -f $dir.FullName) }
+    }
+    return @($lista.ToArray() | Sort-Object Id -Descending)
+}
+
+function Get-QuarantineItem {
+    param([string]$Id)
+    if ($Id -notmatch '^\d{8}_\d{6}_[0-9a-f]{8}$') { return $null }
+    return (Get-QuarantineItems | Where-Object { $_.Id -eq $Id } | Select-Object -First 1)
+}
+
+# Devuelve un elemento de la cuarentena a su sitio. No sobrescribe: si en la
+# ruta original ya hay algo, no restaura.
+function Restore-QuarantineItem {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if (-not $script:IsAdmin) { throw 'hacen falta permisos de administrador' }
+    $e = Get-QuarantineItem $Id
+    if (-not $e) { throw ('no existe el elemento {0} en la cuarentena' -f $Id) }
+
+    if ($e.Tipo -eq 'Registro') {
+        $nativa = ConvertTo-RegNativePath $e.Origen
+        if (-not $nativa) { throw 'ruta de registro no válida en el manifiesto' }
+        $archivo = Join-Path $e.Dir 'clave.reg'
+        if (-not (Test-RegFileScope -File $archivo -RootKey $nativa)) { throw 'el archivo .reg no coincide con la clave original; no se importa' }
+        if (Test-Path -LiteralPath (ConvertTo-RegProviderPath $nativa)) { throw ('la clave ya existe otra vez: {0}' -f $nativa) }
+        & "$env:SystemRoot\System32\reg.exe" import $archivo 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw ('reg.exe no pudo importar la copia (código {0})' -f $LASTEXITCODE) }
+    } else {
+        $origen = [System.IO.Path]::GetFullPath($e.Origen)
+        $fuente = [System.IO.Path]::GetFullPath((Join-Path $e.Dir $e.Contenido))
+        $base = [System.IO.Path]::GetFullPath((Join-Path $e.Dir 'datos')).TrimEnd('\') + '\'
+        if (-not $fuente.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'contenido fuera de la cuarentena; no se restaura' }
+        if (Test-Path -LiteralPath $origen) { throw ('ya existe algo en la ruta original: {0}' -f $origen) }
+        $padre = Split-Path -Parent $origen
+        if ($padre -and -not (Test-Path -LiteralPath $padre)) { [void][System.IO.Directory]::CreateDirectory($padre) }
+        if ($e.Tipo -eq 'Carpeta') {
+            [System.IO.Directory]::Move($fuente, $origen)
+        } else {
+            [System.IO.File]::Move($fuente, $origen)
+        }
+    }
+    Remove-ItemSafe -Path $e.Dir
+    Write-Diag ('Cuarentena {0}: restaurado {1}' -f $e.Id, $e.Origen)
+    return $e
+}
+
+# Borra definitivamente un elemento de la cuarentena.
+function Remove-QuarantineItem {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if (-not $script:IsAdmin) { throw 'hacen falta permisos de administrador' }
+    $e = Get-QuarantineItem $Id
+    if (-not $e) { throw ('no existe el elemento {0} en la cuarentena' -f $Id) }
+    Remove-ItemSafe -Path $e.Dir
+    Write-Diag ('Cuarentena {0}: borrado definitivamente ({1})' -f $e.Id, $e.Origen)
+}
+
+# --- Procesos hijo ------------------------------------------------------------
+# Muchos desinstaladores (NSIS, Inno Setup...) se copian a TEMP, lanzan esa
+# copia y terminan enseguida. Para saber cuándo han acabado de verdad hay que
+# seguir también a sus procesos hijo.
+
+# Procesos que pueden abrir los desinstaladores y que no hay que esperar.
+$script:UninstallIgnoredChildren = @(
+    'conhost.exe', 'explorer.exe', 'msedge.exe', 'chrome.exe', 'firefox.exe', 'opera.exe',
+    'brave.exe', 'iexplore.exe', 'vivaldi.exe', 'werfault.exe', 'msedgewebview2.exe'
+)
+
+# Devuelve los PID de los procesos que descienden de los indicados y siguen en
+# marcha. Usa la fecha de creación para no confundir un PID reutilizado.
+function Get-DescendantProcessIds {
+    param([int[]]$RootIds, [datetime]$Since)
+    $todos = @()
+    try { $todos = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, CreationDate -ErrorAction Stop) } catch { return @() }
+    $limite = $Since.AddSeconds(-2)
+    $pendientes = New-Object System.Collections.Generic.Queue[int]
+    foreach ($r in $RootIds) { $pendientes.Enqueue($r) }
+    $vistos = @{}
+    $resultado = New-Object System.Collections.Generic.List[int]
+    while ($pendientes.Count -gt 0) {
+        $padre = $pendientes.Dequeue()
+        foreach ($p in $todos) {
+            if ([int]$p.ParentProcessId -ne $padre) { continue }
+            $pidHijo = [int]$p.ProcessId
+            if ($vistos.ContainsKey($pidHijo) -or $pidHijo -eq $PID) { continue }
+            if ($p.CreationDate -and $p.CreationDate -lt $limite) { continue }
+            $vistos[$pidHijo] = $true
+            # Los navegadores o el Explorador que abra el desinstalador no se
+            # esperan, ni tampoco lo que lancen ellos.
+            if ($script:UninstallIgnoredChildren -contains ([string]$p.Name).ToLowerInvariant()) { continue }
+            $pendientes.Enqueue($pidHijo)
+            [void]$resultado.Add($pidHijo)
+        }
+    }
+    return @($resultado.ToArray())
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)][string]$Message,
@@ -2200,55 +2693,9 @@ $script:tasks = @(
         Confirm     = $null
         Run         = {
             Write-Log 'Comprobando la protección del sistema y los puntos de restauración...'
-            $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
-            $antes = 0
-            try {
-                $puntosAntes = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber)
-                if ($puntosAntes.Count -gt 0) { $antes = [int]$puntosAntes[-1].SequenceNumber }
-            } catch { }
-            try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop } catch { Write-Diag ('Punto de restauración: Enable-ComputerRestore: ' + $_.Exception.Message) }
-            # Se quita temporalmente el límite de un punto cada 24 h y después se
-            # deja el valor como estaba (antes se quedaba a 0 para siempre).
-            $frecuenciaAnterior = $null
-            $frecuenciaCambiada = $false
-            try {
-                if (Test-Path $srKey) {
-                    $frecuenciaAnterior = (Get-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
-                    New-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-                    $frecuenciaCambiada = $true
-                }
-                Checkpoint-Computer -Description 'Antes de WinTaller' -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
-                Start-Sleep -Seconds 2
-                $puntosDespues = @(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber)
-                $nuevo = $false
-                if ($puntosDespues.Count -gt 0) {
-                    if ([int]$puntosDespues[-1].SequenceNumber -ne $antes) { $nuevo = $true }
-                }
-                if ($nuevo) {
-                    $script:optRestorePointVerified = $true
-                    Write-Log ('Punto de restauración creado y verificado: {0}' -f $puntosDespues[-1].Description) 'OK'
-                } else {
-                    $script:optRestorePointVerified = $false
-                    Write-Log 'Windows no ha creado un punto nuevo. No des por hecho que existe una copia de seguridad.' 'WARN'
-                    Write-Log 'Abre "Crear un punto de restauración" y comprueba que la protección del sistema está activada en la unidad C:.' 'WARN'
-                }
-            } catch {
-                $script:optRestorePointVerified = $false
-                Write-Log ('No se pudo crear el punto de restauración: {0}' -f $_.Exception.Message) 'WARN'
-                Write-Log 'Puede que la protección del sistema este desactivada o que ya se creará un punto en las últimas 24 horas.' 'WARN'
-            } finally {
-                if ($frecuenciaCambiada) {
-                    try {
-                        if ($null -eq $frecuenciaAnterior) {
-                            Remove-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -ErrorAction Stop
-                        } else {
-                            Set-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value ([int]$frecuenciaAnterior) -ErrorAction Stop
-                        }
-                    } catch {
-                        Write-Log ('No se pudo devolver a su valor el límite de un punto de restauración cada 24 h: {0}' -f $_.Exception.Message) 'WARN'
-                    }
-                }
-            }
+            $rp = New-WinTallerRestorePoint -Description 'Antes de WinTaller' -Type 'MODIFY_SETTINGS'
+            foreach ($m in $rp.Messages) { Write-Log $m.Text $m.Level }
+            $script:optRestorePointVerified = [bool]$rp.Verified
         }
     },
     [pscustomobject]@{
@@ -4208,6 +4655,9 @@ $script:uninstTotal       = 0
 $script:uninstCancelled   = $false
 $script:uninstCancelItem  = $false
 $script:uninstUpdating    = $false
+$script:uninstKnownPids   = New-Object System.Collections.Generic.HashSet[int]
+$script:uninstTicks       = 0
+$script:uninstWaitingChildren = $false
 $script:uninstWarned      = @{}
 
 function Get-UninstallRiskRank {
@@ -4696,8 +5146,11 @@ function Start-NextUninstall {
     try {
         $estilo = 'Normal'
         if ($cmd.Hidden) { $estilo = 'Hidden' }
-        $script:uninstProcess = Start-Process -FilePath $cmd.File -ArgumentList $cmd.Args -PassThru -WindowStyle $estilo
+        $script:uninstKnownPids.Clear()
+        $script:uninstTicks = 0
+        $script:uninstWaitingChildren = $false
         $script:uninstStarted = Get-Date
+        $script:uninstProcess = Start-Process -FilePath $cmd.File -ArgumentList $cmd.Args -PassThru -WindowStyle $estilo
         $script:uninstTimer.Start()
     } catch {
         Add-TabLog $script:uninstLog ('{0}: no se pudo iniciar el desinstalador ({1}).' -f $app.Name, $_.Exception.Message) 'ERROR'
@@ -4709,16 +5162,54 @@ function Start-NextUninstall {
     }
 }
 
+# Actualiza la lista de procesos hijo del desinstalador y devuelve los que
+# siguen en marcha. Se guardan también los que ya han terminado para no perder
+# la cadena (desinstalador -> copia en TEMP -> proceso que hace el trabajo).
+function Update-UninstallChildren {
+    $proc = $script:uninstProcess
+    if (-not $proc -or -not $script:uninstStarted) { return @() }
+    $raices = @([int]$proc.Id)
+    foreach ($conocido in $script:uninstKnownPids) { $raices += $conocido }
+    $vivos = @(Get-DescendantProcessIds -RootIds $raices -Since $script:uninstStarted)
+    foreach ($v in $vivos) { [void]$script:uninstKnownPids.Add([int]$v) }
+    return $vivos
+}
+
+function Stop-UninstallProcessTree {
+    $proc = $script:uninstProcess
+    if ($proc) {
+        try { & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
+    }
+    foreach ($hijo in @(Update-UninstallChildren)) {
+        try { & "$env:SystemRoot\System32\taskkill.exe" /PID $hijo /T /F 2>&1 | Out-Null } catch { }
+    }
+}
+
 function Step-UninstallQueue {
     $proc = $script:uninstProcess
     if (-not $proc) { return }
+    $script:uninstTicks++
     $terminado = $false
     try { $terminado = $proc.HasExited } catch { $terminado = $true }
+
+    # Mientras el desinstalador principal sigue abierto se revisan sus hijos
+    # cada ~2,4 s; cuando termina, en cada vuelta del temporizador.
+    $hijosVivos = @()
+    if ($terminado -or ($script:uninstTicks % 3) -eq 1) {
+        $hijosVivos = @(Update-UninstallChildren)
+    }
+    if ($terminado -and $hijosVivos.Count -gt 0) {
+        if (-not $script:uninstWaitingChildren -and $script:uninstCurrent) {
+            $script:uninstWaitingChildren = $true
+            Add-TabLog $script:uninstLog ('{0}: el desinstalador sigue trabajando en otro proceso; se espera a que termine.' -f $script:uninstCurrent.Tag.Name) 'INFO'
+        }
+        $terminado = $false
+    }
 
     if (-not $terminado) {
         if ($script:uninstStarted -and ((Get-Date) - $script:uninstStarted).TotalMinutes -gt 45) {
             $colgado = $script:uninstCurrent
-            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $proc.Id /T /F 2>&1 | Out-Null } catch { }
+            Stop-UninstallProcessTree
             Add-TabLog $script:uninstLog ('{0}: el desinstalador superó 45 minutos y se ha cancelado.' -f $colgado.Tag.Name) 'WARN'
             $script:uninstErrors++
             $script:uninstDone++
@@ -4784,6 +5275,30 @@ function Start-UninstallQueue {
     $texto += "`nQuieres continuar?"
     if ([System.Windows.Forms.MessageBox]::Show($texto, "$script:AppName - confirmar desinstalación", 'OKCancel', 'Warning') -ne 'OK') { return }
 
+    # Punto de restauración antes de desinstalar nada.
+    Add-TabLog $script:uninstLog 'Creando un punto de restauración antes de desinstalar...' 'STEP'
+    $script:statusLabel.Text = 'Creando punto de restauración...'
+    $rp = $null
+    try {
+        $script:form.UseWaitCursor = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $rp = New-WinTallerRestorePoint -Description 'WinTaller: antes de desinstalar programas' -Type 'APPLICATION_UNINSTALL'
+    } finally {
+        $script:form.UseWaitCursor = $false
+        $script:statusLabel.Text = 'Listo'
+    }
+    if ($rp) { foreach ($m in $rp.Messages) { Add-TabLog $script:uninstLog $m.Text $m.Level } }
+    if (-not $rp -or -not $rp.Verified) {
+        $respuesta = [System.Windows.Forms.MessageBox]::Show(
+            "No se ha podido verificar que exista un punto de restauración nuevo.`n`nSi continúas y algo sale mal, no habrá un punto del sistema al que volver.`n`n¿Desinstalar igualmente?",
+            "$script:AppName - punto de restauración", 'YesNo', 'Warning')
+        if ($respuesta -ne 'Yes') {
+            Add-TabLog $script:uninstLog 'Desinstalación cancelada: no hay punto de restauración verificado.' 'WARN'
+            return
+        }
+        Add-TabLog $script:uninstLog 'Se continúa sin punto de restauración verificado (decisión del usuario).' 'WARN'
+    }
+
     $script:uninstQueue.Clear()
     foreach ($item in $seleccion) { $script:uninstQueue.Enqueue($item) }
     $script:uninstTotal = $seleccion.Count
@@ -4807,7 +5322,7 @@ function Stop-UninstallQueue {
     $script:uninstQueue.Clear()
     if ($script:uninstProcess) {
         $script:uninstCancelItem = $true
-        try { & "$env:SystemRoot\System32\taskkill.exe" /PID $script:uninstProcess.Id /T /F 2>&1 | Out-Null } catch { }
+        Stop-UninstallProcessTree
         Add-TabLog $script:uninstLog 'Desinstalación detenida por el usuario.' 'WARN'
     } else {
         Finish-UninstallQueue
