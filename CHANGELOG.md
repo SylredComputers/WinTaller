@@ -9,6 +9,9 @@
 **Novedades**
 - Desinstalar: al terminar, busca los restos de cada programa desinstalado (carpeta de instalación, carpetas con su nombre o el del fabricante en Program Files, ProgramData y AppData, accesos directos rotos y claves en `HKLM\SOFTWARE`, `WOW6432Node` y `HKCU\Software`). Solo coincidencias exactas de nombre, nunca algo que use otro programa instalado. Los de confianza alta vienen marcados; lo que se quita va a la cuarentena.
 - Desinstalar: botón **Cuarentena** para ver, restaurar o borrar definitivamente lo que se ha quitado.
+- Optimización: botón **Carpetas vacías**. Busca carpetas sin ningún archivo en Program Files, ProgramData y AppData de programas que ya no están instalados (no entra en carpetas de Windows, Microsoft ni fabricantes de hardware, no sigue enlaces y no toca nada cambiado en los últimos 7 días). Lo que se quita va a la cuarentena.
+- Windows más ágil: segundos en el reloj, archivos ocultos visibles, "Hibernar" en el menú de apagado, quitar la búsqueda web del menú Inicio y sudo para Windows (11 24H2). Todas con **Deshacer**.
+- Energía: plan **Máximo rendimiento** (se crea la copia del plan oculto si no existe).
 
 **Correcciones**
 - Desinstalar: se espera a los procesos hijo del desinstalador (NSIS, Inno Setup…). Antes, los que se copian a TEMP y salen enseguida se daban por terminados mientras seguían trabajando. Al detener la cola también se cierran esos procesos.

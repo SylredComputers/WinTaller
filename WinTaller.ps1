@@ -4153,6 +4153,9 @@ $infoButtons.Controls.Add($btnRefreshInfo)
 $btnStartup = New-ActionButton 'Programas de inicio'
 $infoButtons.Controls.Add($btnStartup)
 
+$btnEmptyFolders = New-ActionButton 'Carpetas vacías'
+$infoButtons.Controls.Add($btnEmptyFolders)
+
 $script:split = New-Object System.Windows.Forms.SplitContainer
 $script:split.Dock = 'Fill'
 $script:split.Orientation = 'Vertical'
@@ -4358,6 +4361,7 @@ $btnRefreshInfo.add_Click({
 })
 
 $btnStartup.add_Click({ Select-AppTab $tabInicio })
+$btnEmptyFolders.add_Click({ Invoke-EmptyFolderScan })
 
 # ---------------------------------------------------------------------------
 # Pestaña: Programas (instalador tipo Ninite con winget)
@@ -5717,10 +5721,15 @@ function New-DialogButton {
 }
 
 function Show-LeftoversDialog {
-    param($Items)
+    param(
+        $Items,
+        [string]$Title = 'restos encontrados',
+        [string]$Intro = '',
+        [scriptblock]$Log = { param($Texto, $Nivel) Add-TabLog $script:uninstLog $Texto $Nivel }
+    )
     $dlg = New-Object System.Windows.Forms.Form
     try { $dlg.Icon = Get-AppIcon } catch { }
-    $dlg.Text = "$script:AppName - restos encontrados"
+    $dlg.Text = "$script:AppName - $Title"
     $dlg.Size = New-Object System.Drawing.Size(980, 520)
     $dlg.MinimumSize = New-Object System.Drawing.Size(700, 360)
     $dlg.StartPosition = 'CenterParent'
@@ -5730,7 +5739,7 @@ function Show-LeftoversDialog {
     $aviso.Dock = 'Top'
     $aviso.Height = 44
     $aviso.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 0)
-    $aviso.Text = "Las de confianza ALTA vienen marcadas. Revisa las de confianza MEDIA antes de marcarlas.`nLo que quites NO se borra: se guarda en la cuarentena (botón 'Cuarentena') hasta que tú lo restaures o lo borres definitivamente."
+    if ($Intro) { $aviso.Text = $Intro } else { $aviso.Text = "Las de confianza ALTA vienen marcadas. Revisa las de confianza MEDIA antes de marcarlas.`nLo que quites NO se borra: se guarda en la cuarentena (botón 'Cuarentena') hasta que tú lo restaures o lo borres definitivamente." }
 
     $lista = New-Object System.Windows.Forms.ListView
     $lista.Dock = 'Fill'
@@ -5792,7 +5801,7 @@ function Show-LeftoversDialog {
         $txt = 'Se van a mover {0} elementos a la cuarentena.' -f $marcadas.Count
         if ($medias -gt 0) { $txt += "`n`n{0} son de confianza MEDIA: comprueba que no los usa otro programa." -f $medias }
         $txt += "`n`n¿Continuar?"
-        if ([System.Windows.Forms.MessageBox]::Show($txt, "$script:AppName - restos", 'YesNo', 'Warning') -ne 'Yes') { return }
+        if ([System.Windows.Forms.MessageBox]::Show($txt, "$script:AppName - $Title", 'YesNo', 'Warning') -ne 'Yes') { return }
         $ok = 0
         $mal = 0
         # Primero lo más profundo, para que no falle un hijo después de mover su carpeta.
@@ -5805,11 +5814,11 @@ function Show-LeftoversDialog {
                     if (-not (Test-Path -LiteralPath $x.Path)) { $lista.Items.Remove($it); continue }
                     $id = Move-ToQuarantine -Path $x.Path -Reason $x.Detail -Program $x.Program
                 }
-                Add-TabLog $script:uninstLog ('Resto a la cuarentena ({0}): {1}' -f $id, $x.Path) 'OK'
+                & $Log ('Resto a la cuarentena ({0}): {1}' -f $id, $x.Path) 'OK'
                 $lista.Items.Remove($it)
                 $ok++
             } catch {
-                Add-TabLog $script:uninstLog ('No se pudo quitar {0}: {1}' -f $x.Path, $_.Exception.Message) 'WARN'
+                & $Log ('No se pudo quitar {0}: {1}' -f $x.Path, $_.Exception.Message) 'WARN'
                 $it.ForeColor = [System.Drawing.Color]::FromArgb(190, 30, 30)
                 $mal++
             }
@@ -5933,6 +5942,166 @@ function Show-QuarantineDialog {
     $dlg.CancelButton = $btnCerrar
     [void]$dlg.ShowDialog($script:form)
     $dlg.Dispose()
+}
+
+# ---------------------------------------------------------------------------
+# Carpetas vacías
+# ---------------------------------------------------------------------------
+# Busca carpetas sin ningún archivo dentro (ni en sus subcarpetas) en Program
+# Files, ProgramData y AppData. No entra en carpetas de Windows ni de Microsoft,
+# no sigue enlaces, no toca carpetas cambiadas en los últimos 7 días y no
+# revisa por dentro las carpetas de los programas que siguen instalados (allí
+# las carpetas vacías suelen ser necesarias y el programa las vuelve a crear).
+
+$script:EmptyFolderSkipNames = @(
+    'microsoft', 'windows', 'packages', 'temp', 'tmp', 'package cache', 'wintaller', 'windowsapps',
+    'modifiablewindowsapps', 'common files', 'internet explorer', 'reference assemblies', 'msbuild',
+    'dotnet', 'uninstall information', 'ssh', 'usoshared', 'usoprivate', 'softwaredistribution',
+    'crashdumps', 'connecteddevicesplatform', 'comms', 'd3dscache', 'application data', 'desktop',
+    'documents', 'start menu', 'templates', 'favorites', 'programs', 'regid.1991-06.com.microsoft',
+    'packagemanagement', 'nuget', 'assembly', 'installer', 'cache', 'caches'
+)
+
+function Test-EmptyFolderSkipName {
+    param([string]$Name)
+    $n = $Name.ToLowerInvariant()
+    if ($script:EmptyFolderSkipNames -contains $n) { return $true }
+    # Fabricantes de hardware y nombres genéricos (drivers, utilidades del sistema).
+    if (-not (Test-LeftoverNameUsable $n)) { return $true }
+    if (-not (Test-LeftoverNameUsable (Get-NormalizedPublisher $n))) { return $true }
+    if ($n.StartsWith('microsoft') -or $n.StartsWith('windows') -or $n.StartsWith('{')) { return $true }
+    return $false
+}
+
+# Indica si la carpeta de primer nivel pertenece a un programa instalado.
+function Test-EmptyFolderOwnerInstalled {
+    param([System.IO.DirectoryInfo]$Dir, $Footprint)
+    $n = $Dir.Name.ToLowerInvariant()
+    if ($Footprint.Names.ContainsKey($n) -or $Footprint.Publishers.ContainsKey($n)) { return $true }
+    $nn = Get-NormalizedAppName $Dir.Name
+    if ($nn -and ($Footprint.Names.ContainsKey($nn) -or $Footprint.Publishers.ContainsKey($nn))) { return $true }
+    $np = Get-NormalizedPublisher $Dir.Name
+    if ($np -and $Footprint.Publishers.ContainsKey($np)) { return $true }
+    foreach ($f in $Footprint.Folders) {
+        if ((Split-Path -Leaf $f) -ieq $Dir.Name) { return $true }
+    }
+    return (Test-PathUsedByInstalled $Dir.FullName $Footprint)
+}
+
+# Recorre una carpeta y devuelve $true si no contiene ningún archivo. Las
+# subcarpetas vacías cuyo padre no está vacío se añaden a $Found.
+function Get-EmptyFolderTree {
+    param([System.IO.DirectoryInfo]$Dir, [int]$Depth, $Found, $State)
+    $State.Visited++
+    if ($State.Visited % 500 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+    if ($Depth -gt 8 -or $State.Visited -gt 200000) { return $false }
+    $attrs = $Dir.Attributes
+    if (($attrs -band [System.IO.FileAttributes]::ReparsePoint) -or ($attrs -band [System.IO.FileAttributes]::System)) { return $false }
+
+    $vacias = New-Object System.Collections.Generic.List[System.IO.DirectoryInfo]
+    $todoVacio = $true
+    try {
+        foreach ($e in $Dir.EnumerateFileSystemInfos()) {
+            if ($e -is [System.IO.DirectoryInfo]) {
+                if (Get-EmptyFolderTree -Dir $e -Depth ($Depth + 1) -Found $Found -State $State) {
+                    [void]$vacias.Add($e)
+                } else {
+                    $todoVacio = $false
+                }
+            } else {
+                $todoVacio = $false
+            }
+        }
+    } catch {
+        # Sin permiso para leerla: no se propone ni ella ni sus padres.
+        return $false
+    }
+    if (-not $todoVacio) {
+        foreach ($v in $vacias) { [void]$Found.Add($v) }
+    }
+    return $todoVacio
+}
+
+function Find-EmptyFolders {
+    param($Footprint)
+    $raices = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:APPDATA, $env:LOCALAPPDATA,
+        (Join-Path $env:LOCALAPPDATA 'Programs'), (Join-Path $env:USERPROFILE 'AppData\LocalLow')) |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique
+    $limiteFecha = (Get-Date).AddDays(-7)
+    $estado = [pscustomobject]@{ Visited = 0 }
+    $resultado = New-Object System.Collections.ArrayList
+    $vistos = @{}
+
+    foreach ($raiz in $raices) {
+        $hijos = @()
+        try { $hijos = @((New-Object System.IO.DirectoryInfo($raiz)).GetDirectories()) } catch { continue }
+        foreach ($primer in $hijos) {
+            if (Test-EmptyFolderSkipName $primer.Name) { continue }
+            if (($primer.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or ($primer.Attributes -band [System.IO.FileAttributes]::System)) { continue }
+            if (-not (Test-FileSystemPathRemovable $primer.FullName)) { continue }
+            if (Test-EmptyFolderOwnerInstalled $primer $Footprint) { continue }
+
+            $encontradas = New-Object System.Collections.Generic.List[System.IO.DirectoryInfo]
+            $vacia = Get-EmptyFolderTree -Dir $primer -Depth 1 -Found $encontradas -State $estado
+            $candidatas = @()
+            $confianza = 'Media'
+            $detalle = 'Subcarpeta vacía de un programa que no está instalado'
+            if ($vacia) {
+                $candidatas = @($primer)
+                $confianza = 'Alta'
+                $detalle = 'Carpeta vacía de un programa que no está instalado'
+            } else {
+                $candidatas = @($encontradas.ToArray())
+            }
+            foreach ($c in $candidatas) {
+                $clave = $c.FullName.ToLowerInvariant()
+                if ($vistos.ContainsKey($clave)) { continue }
+                try { $c.Refresh() } catch { }
+                if ($c.LastWriteTime -gt $limiteFecha) { continue }
+                if (-not (Test-FileSystemPathRemovable $c.FullName)) { continue }
+                if (Test-PathUsedByInstalled $c.FullName $Footprint) { continue }
+                $vistos[$clave] = $true
+                [void]$resultado.Add([pscustomobject]@{
+                    Kind       = 'Carpeta vacía'
+                    Path       = $c.FullName
+                    Confidence = $confianza
+                    Program    = $primer.Name
+                    Detail     = ('{0} (sin cambios desde {1:dd/MM/yyyy})' -f $detalle, $c.LastWriteTime)
+                })
+            }
+        }
+    }
+    Write-Diag ('Carpetas vacías: {0} carpetas revisadas, {1} propuestas' -f $estado.Visited, $resultado.Count)
+    return @($resultado.ToArray())
+}
+
+function Invoke-EmptyFolderScan {
+    if (-not (Assert-Admin)) { return }
+    Write-Log 'Buscando carpetas vacías en Program Files, ProgramData y AppData...' 'STEP'
+    $script:statusLabel.Text = 'Buscando carpetas vacías...'
+    $encontradas = @()
+    try {
+        $script:form.UseWaitCursor = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $huella = Get-InstalledFootprint
+        $encontradas = @(Find-EmptyFolders -Footprint $huella)
+    } catch {
+        Write-Log ('Error al buscar carpetas vacías: {0}' -f $_.Exception.Message) 'ERROR'
+        Write-Diag ('Carpetas vacías: ' + $_.Exception.ToString())
+        return
+    } finally {
+        $script:form.UseWaitCursor = $false
+        $script:statusLabel.Text = 'Listo'
+    }
+    if ($encontradas.Count -eq 0) {
+        Write-Log 'No se han encontrado carpetas vacías que se puedan quitar con seguridad.' 'OK'
+        [void][System.Windows.Forms.MessageBox]::Show('No se han encontrado carpetas vacías que se puedan quitar con seguridad.', $script:AppName, 'OK', 'Information')
+        return
+    }
+    Write-Log ('Carpetas vacías encontradas: {0}.' -f $encontradas.Count) 'INFO'
+    Show-LeftoversDialog -Items $encontradas -Title 'carpetas vacías' `
+        -Intro "Carpetas sin ningún archivo, de programas que ya no están instalados. Las de confianza ALTA vienen marcadas.`nLo que quites NO se borra: se guarda en la cuarentena (Programas > Desinstalar > 'Cuarentena') hasta que lo restaures o lo borres." `
+        -Log { param($Texto, $Nivel) Write-Log $Texto $Nivel }
 }
 
 $tabUninstall = New-Object System.Windows.Forms.TabPage
@@ -6259,6 +6428,7 @@ $script:PowerPlans = @{
     'Alto'        = [pscustomobject]@{ Guid = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'; Label = 'Alto rendimiento'; Names = @('Alto rendimiento', 'High performance') }
     'Equilibrado' = [pscustomobject]@{ Guid = '381b4222-f694-41f0-9685-ff5bb260df2e'; Label = 'Equilibrado'; Names = @('Equilibrado', 'Balanced') }
     'Economia'    = [pscustomobject]@{ Guid = 'a1841308-3541-4fab-bc81-f71556f20b4a'; Label = 'Economizador'; Names = @('Economizador', 'Ahorro de energía', 'Power saver') }
+    'Maximo'      = [pscustomobject]@{ Guid = 'e9a42b02-d5df-448d-aa00-03f14749eb61'; Label = 'Máximo rendimiento'; Names = @('Máximo rendimiento', 'Ultimate Performance') }
 }
 
 function Test-PowerPlanActive {
@@ -6375,6 +6545,21 @@ $script:equipoActions = @(
         Run         = {
             Set-PowerPlan 'Economia'
             Add-TabLog $script:eqLog 'Plan de energía cambiado a ECONOMIZADOR.' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Plan de energía: Máximo rendimiento'
+        Group       = 'Energía'
+        Exclusive   = 'Plan'
+        NeedsAdmin  = $true
+        Description = 'Plan oculto de Windows pensado para estaciones de trabajo: quita las pequeñas esperas de ahorro de energía de la CPU, el disco y los buses. Rinde algo más que Alto rendimiento en tareas pesadas (renderizado, compilación, máquinas virtuales). Gasta más electricidad y calienta más: no lo uses en portátiles con batería. Si no existe, se crea una copia del plan.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = { Get-PowerPlanState 'Maximo' }
+        Run         = {
+            Set-PowerPlan 'Maximo'
+            Add-TabLog $script:eqLog 'Plan de energía cambiado a MÁXIMO RENDIMIENTO.' 'OK'
         }
     },
     [pscustomobject]@{
@@ -6716,6 +6901,136 @@ $script:equipoActions = @(
         Undo        = {
             Remove-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'VerboseStatus'
             Add-TabLog $script:eqLog 'Mensajes detallados de arranque y apagado desactivados (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Mostrar los segundos en el reloj de la barra'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'El reloj de la barra de tareas muestra también los segundos. Útil para medir tiempos o sincronizar. Gasta un poco más de batería en portátiles. En Windows 11 necesita la versión 22H2 actualizada o posterior; en Windows 10 se ve al reiniciar el Explorador.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'ShowSecondsInSystemClock'
+            if ($v -eq 1) { New-EquipoState 'Con segundos' $true } else { New-EquipoState 'Sin segundos' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'ShowSecondsInSystemClock' 1
+            Update-ExplorerSettings
+            Add-TabLog $script:eqLog 'Segundos activados en el reloj. Si no aparecen, reinicia el Explorador o cierra sesión.' 'OK'
+        }
+        Undo        = {
+            Remove-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'ShowSecondsInSystemClock'
+            Update-ExplorerSettings
+            Add-TabLog $script:eqLog 'El reloj vuelve a mostrarse sin segundos (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Mostrar los archivos y carpetas ocultos'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'El Explorador muestra los elementos ocultos, como C:\ProgramData o la carpeta AppData. Imprescindible en taller para revisar configuraciones y restos de programas. Los archivos protegidos del sistema siguen ocultos.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Hidden'
+            if ($v -eq 1) { New-EquipoState 'Visibles' $true } else { New-EquipoState 'Ocultos' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Hidden' 1
+            Update-ExplorerSettings
+            Add-TabLog $script:eqLog 'Archivos y carpetas ocultos visibles. Si no se ven aún, pulsa F5 en el Explorador.' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Hidden' 2
+            Update-ExplorerSettings
+            Add-TabLog $script:eqLog 'Los archivos y carpetas ocultos vuelven a ocultarse (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Mostrar "Hibernar" en el menú de apagado'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $true
+        Description = 'Añade "Hibernar" junto a Suspender, Apagar y Reiniciar. Hibernar guarda todo lo abierto en el disco y apaga del todo: al encender sigues donde lo dejaste, sin gastar batería. Necesita la hibernación activada; si la has desactivado (grupo Energía), esta opción no se aplica.'
+        Target      = 'Todos'
+        RecDesktop  = $false
+        RecLaptop   = $true
+        State       = {
+            $v = Get-RegValueSafe 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' 'ShowHibernateOption'
+            if ($v -eq 1) { New-EquipoState 'Visible' $true } else { New-EquipoState 'Oculto' $false }
+        }
+        Run         = {
+            if ((Get-HibernationState).Applied) {
+                throw 'La hibernación está desactivada en este equipo. Actívala antes con "powercfg /hibernate on" (PowerShell como administrador).'
+            }
+            Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' 'ShowHibernateOption' 1
+            Add-TabLog $script:eqLog '"Hibernar" añadido al menú de apagado.' 'OK'
+        }
+        Undo        = {
+            Set-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FlyoutMenuSettings' 'ShowHibernateOption' 0
+            Add-TabLog $script:eqLog '"Hibernar" quitado del menú de apagado (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Quitar la búsqueda web del menú Inicio'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $false
+        Description = 'Al buscar en el menú Inicio solo aparecen programas, archivos y ajustes del equipo, sin resultados de Bing. La búsqueda va más rápida y lo que escribes no se envía a Internet. Solo afecta a tu usuario. Se aplica al cerrar sesión o al reiniciar el Explorador.'
+        Target      = 'Todos'
+        RecDesktop  = $true
+        RecLaptop   = $true
+        State       = {
+            $v = Get-RegValueSafe 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions'
+            if ($v -eq 1) { New-EquipoState 'Sin búsqueda web' $true } else { New-EquipoState 'Con búsqueda web' $false }
+        }
+        Run         = {
+            Set-RegValue 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions' 1
+            Add-TabLog $script:eqLog 'Búsqueda web del menú Inicio desactivada. Cierra sesión o reinicia el Explorador para verlo.' 'OK'
+        }
+        Undo        = {
+            Remove-RegValue 'HKCU:\Software\Policies\Microsoft\Windows\Explorer' 'DisableSearchBoxSuggestions'
+            Add-TabLog $script:eqLog 'Búsqueda web del menú Inicio activada de nuevo (valor de Windows).' 'OK'
+        }
+    },
+    [pscustomobject]@{
+        Name        = 'Activar sudo para Windows'
+        Group       = 'Windows más ágil'
+        Exclusive   = ''
+        NeedsAdmin  = $true
+        Description = 'Permite ejecutar un comando como administrador desde una consola normal escribiendo "sudo" delante (por ejemplo: sudo ipconfig /flushdns). Pide confirmación de UAC cada vez y abre el comando en una ventana nueva, que es el modo más seguro. Disponible en Windows 11 24H2 o posterior.'
+        Target      = 'Win11'
+        MinBuild    = 26100
+        RecDesktop  = $false
+        RecLaptop   = $false
+        State       = {
+            if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\sudo.exe'))) { return (New-EquipoState 'No disponible en esta versión' $false) }
+            $v = Get-RegValueSafe 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo' 'Enabled'
+            switch ($v) {
+                1       { New-EquipoState 'Activado (ventana nueva)' $true }
+                2       { New-EquipoState 'Activado (sin entrada)' $true }
+                3       { New-EquipoState 'Activado (en la misma consola)' $true }
+                default { New-EquipoState 'Desactivado' $false }
+            }
+        }
+        Run         = {
+            $sudo = Join-Path $env:SystemRoot 'System32\sudo.exe'
+            if (-not (Test-Path -LiteralPath $sudo)) { throw 'sudo no está disponible en esta versión de Windows (hace falta Windows 11 24H2 o posterior).' }
+            $salida = (& $sudo config --enable forceNewWindow 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw ('sudo no se pudo activar (código {0}): {1}' -f $LASTEXITCODE, $salida) }
+            Add-TabLog $script:eqLog 'sudo activado en modo "ventana nueva". Pruébalo en una consola normal: sudo whoami' 'OK'
+        }
+        Undo        = {
+            $sudo = Join-Path $env:SystemRoot 'System32\sudo.exe'
+            if (-not (Test-Path -LiteralPath $sudo)) { return }
+            $salida = (& $sudo config --disable 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) { throw ('sudo no se pudo desactivar (código {0}): {1}' -f $LASTEXITCODE, $salida) }
+            Add-TabLog $script:eqLog 'sudo desactivado (valor de Windows).' 'OK'
         }
     }
 )
