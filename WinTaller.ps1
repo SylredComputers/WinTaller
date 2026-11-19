@@ -5667,7 +5667,7 @@ function Invoke-UninstallLeftoverScan {
         return
     }
     $texto = "¿Buscar los restos que hayan dejado los programas desinstalados?`n`n" +
-        "(carpetas, accesos directos y claves del registro)`n`nNo se borra nada sin que lo marques; lo que quites va a la cuarentena y se puede restaurar."
+        "(carpetas, accesos directos y claves del registro)`n`nNo se borra nada sin que lo marques. Lo que quites se guarda en la cuarentena y se puede restaurar; solo se borra de verdad cuando tú lo borres desde allí."
     if ([System.Windows.Forms.MessageBox]::Show($texto, "$script:AppName - restos", 'YesNo', 'Question') -ne 'Yes') {
         Add-TabLog $script:uninstLog 'Búsqueda de restos omitida por el usuario.' 'INFO'
         return
@@ -5730,7 +5730,7 @@ function Show-LeftoversDialog {
     $aviso.Dock = 'Top'
     $aviso.Height = 44
     $aviso.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 0)
-    $aviso.Text = "Las de confianza ALTA vienen marcadas. Revisa las de confianza MEDIA antes de marcarlas.`nLo que quites va a la cuarentena (botón 'Cuarentena' de la pestaña) y se puede restaurar."
+    $aviso.Text = "Las de confianza ALTA vienen marcadas. Revisa las de confianza MEDIA antes de marcarlas.`nLo que quites NO se borra: se guarda en la cuarentena (botón 'Cuarentena') hasta que tú lo restaures o lo borres definitivamente."
 
     $lista = New-Object System.Windows.Forms.ListView
     $lista.Dock = 'Fill'
@@ -5850,6 +5850,13 @@ function Show-QuarantineDialog {
     [void]$lista.Columns.Add('Fecha', 130)
     [void]$lista.Columns.Add('Tipo', 90)
     [void]$lista.Columns.Add('Ruta original', 450)
+
+    $aviso = New-Object System.Windows.Forms.Label
+    $aviso.Dock = 'Top'
+    $aviso.Height = 62
+    $aviso.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 0)
+    $aviso.BackColor = [System.Drawing.Color]::FromArgb(255, 248, 225)
+    $raizCuarentena = Join-Path $env:ProgramData 'WinTaller\cuarentena'
     [void]$lista.Columns.Add('Programa', 140)
     [void]$lista.Columns.Add('Motivo', 150)
 
@@ -5868,6 +5875,9 @@ function Show-QuarantineDialog {
             [void]$lista.Items.Add($it)
         }
         $dlg.Text = '{0} - cuarentena ({1} elementos)' -f $script:AppName, $lista.Items.Count
+        $aviso.Text = ("Aquí se guarda lo que quitas (restos de programas, carpetas y claves del registro). Nada se borra solo: " +
+            "sigue ocupando espacio hasta que lo restaures o lo borres definitivamente.`n" +
+            "Contenido: {0}. Ubicación: {1}. Cuando compruebes que todo funciona, puedes borrar lo antiguo.") -f ((Get-FolderSummary $raizCuarentena) -replace '^vacía$', 'vacía'), $raizCuarentena
     }
 
     $botones = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -5918,6 +5928,7 @@ function Show-QuarantineDialog {
 
     & $cargar
     $dlg.Controls.Add($lista)
+    $dlg.Controls.Add($aviso)
     $dlg.Controls.Add($botones)
     $dlg.CancelButton = $btnCerrar
     [void]$dlg.ShowDialog($script:form)
