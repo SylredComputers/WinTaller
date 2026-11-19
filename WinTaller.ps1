@@ -5634,14 +5634,20 @@ function Test-AppStillRegistered {
 function Invoke-UninstallLeftoverScan {
     $apps = @($script:uninstFinished.ToArray())
     $script:uninstFinished.Clear()
-    if ($apps.Count -eq 0) { return }
+    if ($apps.Count -eq 0) {
+        Add-TabLog $script:uninstLog 'Restos: no hay programas de los que buscar (solo se buscan de los desinstalados correctamente; las apps de la Tienda no dejan restos de este tipo).' 'INFO'
+        return
+    }
     if (-not $script:IsAdmin) {
         Add-TabLog $script:uninstLog 'Para buscar y quitar restos hacen falta permisos de administrador.' 'WARN'
         return
     }
     $texto = "¿Buscar los restos que hayan dejado los programas desinstalados?`n`n" +
         "(carpetas, accesos directos y claves del registro)`n`nNo se borra nada sin que lo marques; lo que quites va a la cuarentena y se puede restaurar."
-    if ([System.Windows.Forms.MessageBox]::Show($texto, "$script:AppName - restos", 'YesNo', 'Question') -ne 'Yes') { return }
+    if ([System.Windows.Forms.MessageBox]::Show($texto, "$script:AppName - restos", 'YesNo', 'Question') -ne 'Yes') {
+        Add-TabLog $script:uninstLog 'Búsqueda de restos omitida por el usuario.' 'INFO'
+        return
+    }
 
     Add-TabLog $script:uninstLog 'Buscando restos de los programas desinstalados...' 'STEP'
     $script:statusLabel.Text = 'Buscando restos...'
@@ -13708,6 +13714,7 @@ $script:form.add_Shown({
     Add-TabLog $script:uninstLog 'Pulsa "Actualizar lista" para leer los programas instalados.'
     Add-TabLog $script:uninstLog 'Los componentes de Windows aparecen en rojo y no se pueden quitar desde aquí.'
     Add-TabLog $script:uninstLog 'Marca los programas que quieras quitar y pulsa "Desinstalar seleccionados".'
+    Add-TabLog $script:uninstLog 'Al terminar se ofrece buscar los restos (carpetas y registro). Lo que quites va a la "Cuarentena" y se puede restaurar.'
 
     Add-TabLog $script:prgLog 'Marca los programas que quieras instalar y pulsa "Instalar seleccionados".'
     Add-TabLog $script:prgLog ('Programas disponibles en el catalogo: {0}' -f $script:appCatalog.Count)
