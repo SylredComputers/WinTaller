@@ -565,7 +565,7 @@ $script:ProtectedFsCache = $null
 function Get-ProtectedFileSystemPaths {
     if ($script:ProtectedFsCache) { return $script:ProtectedFsCache }
     $lista = @(
-        $env:SystemDrive + '\',
+        ($env:SystemDrive + '\'),
         $env:SystemRoot,
         $env:ProgramFiles,
         ${env:ProgramFiles(x86)},
@@ -597,7 +597,13 @@ function Get-ProtectedFileSystemPaths {
     }
     $lista += (Join-Path $env:USERPROFILE 'Downloads')
     $lista += (Join-Path $env:USERPROFILE 'OneDrive')
-    $script:ProtectedFsCache = @($lista | Where-Object { $_ } | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') } | Select-Object -Unique)
+    $rutas = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $lista) {
+        if (-not $r) { continue }
+        try { [void]$rutas.Add([System.IO.Path]::GetFullPath([string]$r).TrimEnd('\')) }
+        catch { Write-Diag ('Rutas protegidas: no se pudo leer "{0}": {1}' -f $r, $_.Exception.Message) }
+    }
+    $script:ProtectedFsCache = @($rutas.ToArray() | Select-Object -Unique)
     return $script:ProtectedFsCache
 }
 
@@ -624,6 +630,7 @@ function Test-FileSystemPathRemovable {
         }
         return $true
     } catch {
+        Write-Diag ('Test-FileSystemPathRemovable "{0}": {1}' -f $Path, $_.Exception.Message)
         return $false
     }
 }
