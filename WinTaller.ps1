@@ -561,7 +561,9 @@ function Save-QuarantineManifest {
 }
 
 # Rutas del sistema de archivos que nunca se mandan a la cuarentena.
+$script:ProtectedFsCache = $null
 function Get-ProtectedFileSystemPaths {
+    if ($script:ProtectedFsCache) { return $script:ProtectedFsCache }
     $lista = @(
         $env:SystemDrive + '\',
         $env:SystemRoot,
@@ -595,7 +597,8 @@ function Get-ProtectedFileSystemPaths {
     }
     $lista += (Join-Path $env:USERPROFILE 'Downloads')
     $lista += (Join-Path $env:USERPROFILE 'OneDrive')
-    return @($lista | Where-Object { $_ } | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') } | Select-Object -Unique)
+    $script:ProtectedFsCache = @($lista | Where-Object { $_ } | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') } | Select-Object -Unique)
+    return $script:ProtectedFsCache
 }
 
 # Indica si una carpeta o un archivo se puede mandar a la cuarentena.
@@ -5430,7 +5433,14 @@ function Get-InstalledFootprint {
             if (-not $c) { continue }
             foreach ($p in @([string]$c.InstallLocation, (Get-PathFromCommand ([string]$c.DisplayIcon)), (Get-PathFromCommand ([string]$c.UninstallString)))) {
                 if ($p -and $p.Length -gt 3) {
-                    try { [void]$carpetas.Add([System.IO.Path]::GetFullPath($p.Trim().Trim('"')).TrimEnd('\')) } catch { }
+                    try {
+                        $completa = [System.IO.Path]::GetFullPath($p.Trim().Trim('"')).TrimEnd('\')
+                        # Solo cuentan carpetas propias de un programa. Una entrada que
+                        # apunta a AppData, al perfil o a Program Files bloquearía todo
+                        # lo que hay debajo.
+                        if (Test-FileSystemPathRemovable $completa) { [void]$carpetas.Add($completa) }
+                        else { Write-Diag ('Restos: se ignora la carpeta genérica "{0}" de {1}' -f $completa, [string]$c.DisplayName) }
+                    } catch { }
                 }
             }
             $n = Get-NormalizedAppName ([string]$c.DisplayName)
@@ -5528,6 +5538,8 @@ function Find-UninstallLeftovers {
         }
     }
 
+    Write-Diag ('Restos de {0}: nombres [{1}] fabricantes [{2}] carpeta [{3}]' -f $programa, ($nombres -join ', '), ($fabricantes -join ', '), $carpetaInstalacion)
+
     # --- Carpeta de instalación que indica el propio programa
     if ($carpetaInstalacion -and (Test-Path -LiteralPath $carpetaInstalacion -PathType Container) -and
         -not (Test-PathUsedByInstalled $carpetaInstalacion $Footprint)) {
@@ -5543,8 +5555,11 @@ function Find-UninstallLeftovers {
     foreach ($raiz in $raices) {
         foreach ($nombre in $nombres) {
             $c = Join-Path $raiz $nombre
-            if ($Footprint.Names.ContainsKey($nombre)) { continue }
-            if ((Test-Path -LiteralPath $c -PathType Container) -and (Test-FileSystemPathRemovable $c) -and -not (Test-PathUsedByInstalled $c $Footprint)) {
+            if (-not (Test-Path -LiteralPath $c -PathType Container)) { continue }
+            if ($Footprint.Names.ContainsKey($nombre)) { Write-Diag ('Restos: {0} descartado, otro programa instalado se llama igual' -f $c); continue }
+            if (-not (Test-FileSystemPathRemovable $c)) { Write-Diag ('Restos: {0} descartado, ruta protegida' -f $c); continue }
+            if (Test-PathUsedByInstalled $c $Footprint) { Write-Diag ('Restos: {0} descartado, la usa otro programa instalado' -f $c); continue }
+            if ($true) {
                 & $agregar 'Carpeta' (Get-Item -LiteralPath $c -Force).FullName 'Media' ('Mismo nombre que el programa ({0})' -f (Get-FolderSummary $c))
             }
         }
