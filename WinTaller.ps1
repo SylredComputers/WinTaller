@@ -581,7 +581,12 @@ function Get-ProtectedFileSystemPaths {
         (Join-Path $env:LOCALAPPDATA 'Microsoft'),
         (Join-Path $env:APPDATA 'Microsoft'),
         (Join-Path $env:LOCALAPPDATA 'Packages'),
-        (Join-Path $env:LOCALAPPDATA 'Temp')
+        (Join-Path $env:LOCALAPPDATA 'Programs'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Common'),
+        (Join-Path $env:LOCALAPPDATA 'Temp'),
+        (Join-Path $env:ProgramFiles 'WindowsApps'),
+        (Join-Path $env:ProgramFiles 'Common Files'),
+        (Join-Path $env:ProgramData 'Package Cache')
     )
     foreach ($especial in @('Desktop', 'MyDocuments', 'MyPictures', 'MyMusic', 'MyVideos', 'Favorites', 'StartMenu', 'Programs', 'CommonStartMenu', 'CommonPrograms', 'Startup', 'CommonStartup')) {
         try { $lista += [Environment]::GetFolderPath($especial) } catch { }
@@ -4816,6 +4821,10 @@ function Get-InstalledPrograms {
             if ($clave.QuietUninstallString) { $silencioso = [string]$clave.QuietUninstallString }
             $noQuitar = 0
             try { if ($null -ne $clave.NoRemove) { $noQuitar = [int]$clave.NoRemove } } catch { }
+            $ubicacion = ''
+            if ($clave.InstallLocation) { $ubicacion = ([string]$clave.InstallLocation).Trim().Trim('"') }
+            $icono = ''
+            if ($clave.DisplayIcon) { $icono = [string]$clave.DisplayIcon }
 
             $id = ('{0}|{1}|{2}' -f $nombre, $fabricante, $version).ToLowerInvariant()
             if ($vistos.ContainsKey($id)) { continue }
@@ -4835,6 +4844,9 @@ function Get-InstalledPrograms {
                 QuietUninstall = $silencioso
                 Key            = [string]$clave.PSChildName
                 Hive           = $rama
+                RegPath        = [string]$clave.PSPath
+                InstallLocation = $ubicacion
+                DisplayIcon    = $icono
                 Source         = 'Registro'
                 Risk           = $eval.Risk
                 Protected      = $eval.Protected
@@ -4977,6 +4989,7 @@ function Update-UninstallButtons {
     $script:btnUninstStop.Enabled = [bool]$script:uninstProcess
     $script:btnUninstAll.Enabled = (-not $script:uninstProcess)
     $script:btnUninstRefresh.Enabled = (-not $script:uninstProcess)
+    if ($script:btnUninstQuarantine) { $script:btnUninstQuarantine.Enabled = (-not $script:uninstProcess) }
 }
 
 function Update-UninstallList {
@@ -5088,7 +5101,10 @@ function Finish-UninstallQueue {
         [void][System.Windows.Forms.MessageBox]::Show(
             ("Desinstalación finalizada.`n`nCorrectos: {0}`nCon avisos o errores: {1}`n`nRevisa el registro para ver el detalle." -f ($script:uninstDone - $script:uninstErrors), $script:uninstErrors),
             $script:AppName, 'OK', 'Information')
+        Start-Sleep -Milliseconds 800
+        try { Invoke-UninstallLeftoverScan } catch { Add-TabLog $script:uninstLog ('Error al buscar restos: {0}' -f $_.Exception.Message) 'WARN' }
     }
+    $script:uninstFinished.Clear()
     Start-Sleep -Milliseconds 800
     $script:uninstLoaded = $false
     Update-UninstallList -Reload
@@ -5231,8 +5247,10 @@ function Step-UninstallQueue {
         Add-TabLog $script:uninstLog ('{0}: desinstalación cancelada por el usuario.' -f $nombre) 'WARN'
     } elseif ($codigo -eq 0 -or $codigo -eq 3010 -or $codigo -eq 1641) {
         Add-TabLog $script:uninstLog ('{0}: desinstalado correctamente.' -f $nombre) 'OK'
+        if ($item -and $item.Tag.Source -eq 'Registro') { [void]$script:uninstFinished.Add($item.Tag) }
     } elseif ($codigo -eq 1605) {
         Add-TabLog $script:uninstLog ('{0}: Windows ya no lo tenia instalado.' -f $nombre) 'OK'
+        if ($item -and $item.Tag.Source -eq 'Registro') { [void]$script:uninstFinished.Add($item.Tag) }
     } else {
         Add-TabLog $script:uninstLog ('{0}: el desinstalador terminó con código {1}.' -f $nombre, $codigo) 'WARN'
         $script:uninstErrors++
@@ -5300,6 +5318,7 @@ function Start-UninstallQueue {
     }
 
     $script:uninstQueue.Clear()
+    $script:uninstFinished.Clear()
     foreach ($item in $seleccion) { $script:uninstQueue.Enqueue($item) }
     $script:uninstTotal = $seleccion.Count
     $script:uninstDone = 0
@@ -5327,6 +5346,552 @@ function Stop-UninstallQueue {
     } else {
         Finish-UninstallQueue
     }
+}
+
+# ---------------------------------------------------------------------------
+# Restos de los programas desinstalados
+# ---------------------------------------------------------------------------
+# Al terminar la cola se buscan carpetas, accesos directos y claves que haya
+# dejado cada programa. Solo se proponen coincidencias exactas de nombre (no
+# "contiene"), nunca algo que use otro programa instalado, y no se borra nada
+# sin que el usuario lo marque. Lo que se quita va a la cuarentena.
+
+$script:uninstFinished = New-Object System.Collections.ArrayList
+
+# Nombres demasiado genéricos para buscar por ellos.
+$script:LeftoverGenericNames = @(
+    'microsoft', 'windows', 'common files', 'common', 'shared', 'update', 'updater', 'tools', 'tool',
+    'software', 'program', 'programs', 'app', 'apps', 'application', 'data', 'driver', 'drivers',
+    'runtime', 'system', 'setup', 'installer', 'temp', 'cache', 'config', 'bin', 'lib', 'packages',
+    'google', 'intel', 'nvidia', 'amd', 'realtek', 'adobe', 'apple', 'oracle', 'java', 'mozilla',
+    'hp', 'dell', 'lenovo', 'asus', 'acer', 'msi', 'logitech', 'steam', 'games', 'game', 'launcher',
+    'plugins', 'plugin', 'users', 'user', 'default', 'public', 'local', 'roaming', 'locallow'
+)
+
+function Get-NormalizedAppName {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    $t = $Text.ToLowerInvariant() -replace '[®™©]', ''
+    $t = $t -replace '\((x64|x86|64-bit|32-bit|64 bits|32 bits|remove only|solo quitar)\)', ' '
+    $t = $t -replace '\b(x64|x86|amd64|win64|win32|64-bit|32-bit)\b', ' '
+    $t = $t -replace '\bv?\d+(\.\d+)+[a-z]?\b', ' '
+    $t = $t -replace '\([^\)]*\)?', ' '
+    $t = $t -replace '\b(version|versión|edition)\s*$', ' '
+    $t = $t -replace '[\s_]+', ' '
+    return $t.Trim(' ', '-', '.', ',', '(', ')')
+}
+
+function Get-NormalizedPublisher {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    $t = $Text.ToLowerInvariant() -replace '[®™©]', ''
+    $t = $t -replace '[,\.]?\s*\b(inc|incorporated|ltd|limited|llc|gmbh|s\.?a\.?|s\.?l\.?|corp|corporation|co|ag|b\.?v\.?|pty|srl|s\.?r\.?l\.?|s\.?r\.?o\.?|a\.?s\.?)(?=\W|$)\.?', ' '
+    $t = $t -replace '\s+', ' '
+    return $t.Trim(' ', '-', '.', ',')
+}
+
+function Test-LeftoverNameUsable {
+    param([string]$Name)
+    if (-not $Name -or $Name.Length -lt 3) { return $false }
+    return ($script:LeftoverGenericNames -notcontains $Name)
+}
+
+# Saca la carpeta del ejecutable de una cadena como '"C:\x\uninst.exe" /S' o 'C:\x\app.exe,0'.
+function Get-PathFromCommand {
+    param([string]$Command)
+    if (-not $Command) { return '' }
+    $c = $Command.Trim()
+    if ($c -match '^"([^"]+)"') { $c = $Matches[1] }
+    elseif ($c -match '^(.+?\.(exe|ico|dll))\b') { $c = $Matches[1] }
+    $c = ($c -split ',')[0].Trim().Trim('"')
+    if ($c -match '(?i)\\(system32|syswow64)\\(msiexec|rundll32|cmd)\.exe$') { return '' }
+    try {
+        if ([System.IO.Path]::IsPathRooted($c)) { return [System.IO.Path]::GetDirectoryName($c) }
+    } catch { }
+    return ''
+}
+
+# Datos de todos los programas que siguen registrados (también los de sistema),
+# para no proponer nada que use otro programa.
+function Get-InstalledFootprint {
+    $rutas = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    $carpetas = New-Object System.Collections.Generic.List[string]
+    $nombres = @{}
+    $fabricantes = @{}
+    foreach ($ruta in $rutas) {
+        foreach ($c in @(Get-ItemProperty -Path $ruta -ErrorAction SilentlyContinue)) {
+            if (-not $c) { continue }
+            foreach ($p in @([string]$c.InstallLocation, (Get-PathFromCommand ([string]$c.DisplayIcon)), (Get-PathFromCommand ([string]$c.UninstallString)))) {
+                if ($p -and $p.Length -gt 3) {
+                    try { [void]$carpetas.Add([System.IO.Path]::GetFullPath($p.Trim().Trim('"')).TrimEnd('\')) } catch { }
+                }
+            }
+            $n = Get-NormalizedAppName ([string]$c.DisplayName)
+            if ($n) { $nombres[$n] = $true }
+            $f = Get-NormalizedPublisher ([string]$c.Publisher)
+            if ($f) { $fabricantes[$f] = $true }
+        }
+    }
+    return [pscustomobject]@{ Folders = @($carpetas.ToArray() | Select-Object -Unique); Names = $nombres; Publishers = $fabricantes }
+}
+
+function Test-PathUsedByInstalled {
+    param([string]$Path, $Footprint)
+    $p = $Path.TrimEnd('\')
+    foreach ($f in $Footprint.Folders) {
+        if ($f -ieq $p) { return $true }
+        if ($f.StartsWith($p + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($p.StartsWith($f + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-FolderSummary {
+    param([string]$Path)
+    $archivos = 0
+    $bytes = [int64]0
+    try {
+        foreach ($f in [System.IO.Directory]::EnumerateFiles($Path, '*', [System.IO.SearchOption]::AllDirectories)) {
+            $archivos++
+            try { $bytes += (New-Object System.IO.FileInfo($f)).Length } catch { }
+            if ($archivos -ge 20000) { break }
+        }
+    } catch { }
+    if ($archivos -eq 0) { return 'vacía' }
+    $tam = '{0:N1} MB' -f ($bytes / 1MB)
+    if ($bytes -lt 1MB) { $tam = '{0:N0} KB' -f ($bytes / 1KB) }
+    return ('{0} archivos, {1}' -f $archivos, $tam)
+}
+
+# Busca los restos de un programa ya desinstalado. Devuelve una lista de
+# objetos: Kind (Carpeta, Acceso directo, Registro), Path, Confidence (Alta,
+# Media), Program y Detail. $Footprint viene de Get-InstalledFootprint.
+function Find-UninstallLeftovers {
+    param([Parameter(Mandatory = $true)]$App, [Parameter(Mandatory = $true)]$Footprint)
+
+    $resultado = New-Object System.Collections.ArrayList
+    $vistos = @{}
+    $programa = [string]$App.Name
+
+    $agregar = {
+        param([string]$Kind, [string]$Path, [string]$Confidence, [string]$Detail)
+        $clave = $Path.ToLowerInvariant().TrimEnd('\')
+        if ($vistos.ContainsKey($clave)) {
+            # Si ya estaba con confianza media y ahora es alta, se sube.
+            if ($Confidence -eq 'Alta') { $vistos[$clave].Confidence = 'Alta'; $vistos[$clave].Detail = $Detail }
+            return
+        }
+        $o = [pscustomobject]@{ Kind = $Kind; Path = $Path.TrimEnd('\'); Confidence = $Confidence; Program = $programa; Detail = $Detail }
+        $vistos[$clave] = $o
+        [void]$resultado.Add($o)
+    }
+
+    # --- Pistas: nombres y carpetas del programa
+    $nombres = New-Object System.Collections.Generic.List[string]
+    $fabricantes = New-Object System.Collections.Generic.List[string]
+    $n = Get-NormalizedAppName $App.Name
+    if (Test-LeftoverNameUsable $n) { [void]$nombres.Add($n) }
+    $f = Get-NormalizedPublisher $App.Publisher
+    if ((Test-LeftoverNameUsable $f) -and -not $Footprint.Publishers.ContainsKey($f)) { [void]$fabricantes.Add($f) }
+
+    # La carpeta del icono o del desinstalador solo cuenta como pista si está en
+    # una ubicación de programas (no en Package Cache, Installer, TEMP...).
+    $ubicacionesProgramas = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'), $env:APPDATA, $env:LOCALAPPDATA) |
+        Where-Object { $_ } | ForEach-Object { [System.IO.Path]::GetFullPath($_).TrimEnd('\') + '\' }
+    $pistas = @()
+    if ($App.InstallLocation) { $pistas += [string]$App.InstallLocation }
+    foreach ($desdeComando in @((Get-PathFromCommand ([string]$App.DisplayIcon)), (Get-PathFromCommand ([string]$App.Uninstall)))) {
+        if (-not $desdeComando) { continue }
+        foreach ($u in $ubicacionesProgramas) {
+            if ($desdeComando.StartsWith($u, [System.StringComparison]::OrdinalIgnoreCase) -and $desdeComando -notmatch '(?i)\\(temp|package cache|installer)(\\|$)') { $pistas += $desdeComando; break }
+        }
+    }
+    $carpetaInstalacion = ''
+    foreach ($pista in $pistas) {
+        if (-not $pista) { continue }
+        try { $pista = [System.IO.Path]::GetFullPath($pista.Trim().Trim('"')).TrimEnd('\') } catch { continue }
+        if (-not (Test-FileSystemPathRemovable $pista)) { continue }
+        if (-not $carpetaInstalacion) { $carpetaInstalacion = $pista }
+        $hoja = (Split-Path -Leaf $pista).ToLowerInvariant()
+        if ((Test-LeftoverNameUsable $hoja) -and -not $nombres.Contains($hoja)) { [void]$nombres.Add($hoja) }
+        $padre = Split-Path -Parent $pista
+        if ($padre -and (Test-FileSystemPathRemovable $padre)) {
+            $hp = (Split-Path -Leaf $padre).ToLowerInvariant()
+            if ((Test-LeftoverNameUsable $hp) -and -not $fabricantes.Contains($hp) -and -not $Footprint.Publishers.ContainsKey($hp)) { [void]$fabricantes.Add($hp) }
+        }
+    }
+
+    # --- Carpeta de instalación que indica el propio programa
+    if ($carpetaInstalacion -and (Test-Path -LiteralPath $carpetaInstalacion -PathType Container) -and
+        -not (Test-PathUsedByInstalled $carpetaInstalacion $Footprint)) {
+        & $agregar 'Carpeta' $carpetaInstalacion 'Alta' ('Carpeta de instalación del programa ({0})' -f (Get-FolderSummary $carpetaInstalacion))
+    }
+
+    # --- Carpetas con el mismo nombre en las ubicaciones habituales
+    $raices = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:APPDATA, $env:LOCALAPPDATA,
+        (Join-Path $env:LOCALAPPDATA 'Programs'), (Join-Path $env:USERPROFILE 'AppData\LocalLow'),
+        [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms')) |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -Unique
+
+    foreach ($raiz in $raices) {
+        foreach ($nombre in $nombres) {
+            $c = Join-Path $raiz $nombre
+            if ($Footprint.Names.ContainsKey($nombre)) { continue }
+            if ((Test-Path -LiteralPath $c -PathType Container) -and (Test-FileSystemPathRemovable $c) -and -not (Test-PathUsedByInstalled $c $Footprint)) {
+                & $agregar 'Carpeta' (Get-Item -LiteralPath $c -Force).FullName 'Media' ('Mismo nombre que el programa ({0})' -f (Get-FolderSummary $c))
+            }
+        }
+        foreach ($fab in $fabricantes) {
+            $cf = Join-Path $raiz $fab
+            if (-not (Test-Path -LiteralPath $cf -PathType Container)) { continue }
+            $hijos = @(Get-ChildItem -LiteralPath $cf -Force -ErrorAction SilentlyContinue)
+            $delPrograma = @($hijos | Where-Object { $_.PSIsContainer -and $nombres.Contains($_.Name.ToLowerInvariant()) })
+            if ($hijos.Count -gt 0 -and $hijos.Count -eq $delPrograma.Count -and (Test-FileSystemPathRemovable $cf) -and -not (Test-PathUsedByInstalled $cf $Footprint)) {
+                # La carpeta del fabricante solo contiene la del programa: se propone entera.
+                foreach ($h in $delPrograma) { $vistos.Remove($h.FullName.ToLowerInvariant()) | Out-Null; $resultado.Remove(($resultado | Where-Object { $_.Path -ieq $h.FullName } | Select-Object -First 1)) }
+                & $agregar 'Carpeta' (Get-Item -LiteralPath $cf -Force).FullName 'Media' ('Carpeta del fabricante; solo contiene la del programa ({0})' -f (Get-FolderSummary $cf))
+            } elseif ($hijos.Count -eq 0 -and (Test-FileSystemPathRemovable $cf)) {
+                & $agregar 'Carpeta' (Get-Item -LiteralPath $cf -Force).FullName 'Media' 'Carpeta del fabricante vacía'
+            } else {
+                foreach ($h in $delPrograma) {
+                    if ((Test-FileSystemPathRemovable $h.FullName) -and -not (Test-PathUsedByInstalled $h.FullName $Footprint)) {
+                        & $agregar 'Carpeta' $h.FullName 'Media' ('Dentro de la carpeta del fabricante ({0})' -f (Get-FolderSummary $h.FullName))
+                    }
+                }
+            }
+        }
+    }
+
+    # --- Accesos directos rotos que apuntan a la carpeta de instalación
+    if ($carpetaInstalacion) {
+        $shell = $null
+        try { $shell = New-Object -ComObject WScript.Shell } catch { }
+        if ($shell) {
+            $sitios = @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('CommonDesktopDirectory'),
+                [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonPrograms')) |
+                Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+            foreach ($sitio in $sitios) {
+                foreach ($lnk in @(Get-ChildItem -LiteralPath $sitio -Filter '*.lnk' -Recurse -Depth 2 -Force -ErrorAction SilentlyContinue)) {
+                    try {
+                        $destino = [string]$shell.CreateShortcut($lnk.FullName).TargetPath
+                        if ($destino -and $destino.StartsWith($carpetaInstalacion + '\', [System.StringComparison]::OrdinalIgnoreCase) -and
+                            -not (Test-Path -LiteralPath $destino) -and (Test-FileSystemPathRemovable $lnk.FullName)) {
+                            & $agregar 'Acceso directo' $lnk.FullName 'Alta' ('Apunta a un archivo que ya no existe: {0}' -f $destino)
+                        }
+                    } catch { }
+                }
+            }
+            try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } catch { }
+        }
+    }
+
+    # --- Registro: HKLM\SOFTWARE, WOW6432Node y HKCU\Software
+    $raicesReg = @('HKLM:\SOFTWARE', 'HKLM:\SOFTWARE\WOW6432Node', 'HKCU:\Software')
+    foreach ($rr in $raicesReg) {
+        $subclaves = @()
+        try { $subclaves = @(Get-ChildItem -LiteralPath $rr -ErrorAction Stop | ForEach-Object { $_.PSChildName }) } catch { continue }
+        foreach ($sub in $subclaves) {
+            $subN = $sub.ToLowerInvariant()
+            if ($nombres.Contains($subN) -and -not $Footprint.Names.ContainsKey($subN)) {
+                $ruta = '{0}\{1}' -f $rr, $sub
+                if (Test-RegistryKeyRemovable $ruta) { & $agregar 'Registro' (ConvertTo-RegNativePath $ruta) 'Media' 'Clave con el nombre del programa' }
+                continue
+            }
+            if (-not $fabricantes.Contains($subN)) { continue }
+            $rutaFab = '{0}\{1}' -f $rr, $sub
+            $hijas = @()
+            try { $hijas = @(Get-ChildItem -LiteralPath $rutaFab -ErrorAction Stop | ForEach-Object { $_.PSChildName }) } catch { continue }
+            $delPrograma = @($hijas | Where-Object { $nombres.Contains($_.ToLowerInvariant()) })
+            $valores = @()
+            try { $valores = @((Get-Item -LiteralPath $rutaFab -ErrorAction Stop).GetValueNames() | Where-Object { $_ }) } catch { }
+            if ($hijas.Count -gt 0 -and $hijas.Count -eq $delPrograma.Count -and $valores.Count -eq 0) {
+                if (Test-RegistryKeyRemovable $rutaFab) { & $agregar 'Registro' (ConvertTo-RegNativePath $rutaFab) 'Media' 'Clave del fabricante; solo contiene la del programa' }
+            } else {
+                foreach ($h in $delPrograma) {
+                    $ruta = '{0}\{1}' -f $rutaFab, $h
+                    if (Test-RegistryKeyRemovable $ruta) { & $agregar 'Registro' (ConvertTo-RegNativePath $ruta) 'Media' 'Clave del programa dentro de la del fabricante' }
+                }
+            }
+        }
+    }
+
+    return @($resultado.ToArray())
+}
+
+# Indica si la entrada de desinstalación del programa sigue en el registro.
+function Test-AppStillRegistered {
+    param($App)
+    if (-not $App.RegPath) { return $false }
+    return (Test-Path -LiteralPath $App.RegPath)
+}
+
+# Busca los restos de los programas desinstalados en esta cola y los muestra.
+function Invoke-UninstallLeftoverScan {
+    $apps = @($script:uninstFinished.ToArray())
+    $script:uninstFinished.Clear()
+    if ($apps.Count -eq 0) { return }
+    if (-not $script:IsAdmin) {
+        Add-TabLog $script:uninstLog 'Para buscar y quitar restos hacen falta permisos de administrador.' 'WARN'
+        return
+    }
+    $texto = "¿Buscar los restos que hayan dejado los programas desinstalados?`n`n" +
+        "(carpetas, accesos directos y claves del registro)`n`nNo se borra nada sin que lo marques; lo que quites va a la cuarentena y se puede restaurar."
+    if ([System.Windows.Forms.MessageBox]::Show($texto, "$script:AppName - restos", 'YesNo', 'Question') -ne 'Yes') { return }
+
+    Add-TabLog $script:uninstLog 'Buscando restos de los programas desinstalados...' 'STEP'
+    $script:statusLabel.Text = 'Buscando restos...'
+    $encontrados = New-Object System.Collections.ArrayList
+    try {
+        $script:form.UseWaitCursor = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $huella = Get-InstalledFootprint
+        foreach ($app in $apps) {
+            [System.Windows.Forms.Application]::DoEvents()
+            if (Test-AppStillRegistered $app) {
+                Add-TabLog $script:uninstLog ('{0}: sigue registrado como instalado; no se buscan restos.' -f $app.Name) 'WARN'
+                continue
+            }
+            try {
+                $r = @(Find-UninstallLeftovers -App $app -Footprint $huella)
+                Add-TabLog $script:uninstLog ('{0}: {1} restos encontrados.' -f $app.Name, $r.Count) 'INFO'
+                foreach ($x in $r) { [void]$encontrados.Add($x) }
+            } catch {
+                Add-TabLog $script:uninstLog ('{0}: error al buscar restos ({1}).' -f $app.Name, $_.Exception.Message) 'WARN'
+            }
+        }
+    } finally {
+        $script:form.UseWaitCursor = $false
+        $script:statusLabel.Text = 'Listo'
+    }
+    if ($encontrados.Count -eq 0) {
+        Add-TabLog $script:uninstLog 'No se han encontrado restos.' 'OK'
+        [void][System.Windows.Forms.MessageBox]::Show('No se han encontrado restos de los programas desinstalados.', $script:AppName, 'OK', 'Information')
+        return
+    }
+    Show-LeftoversDialog -Items @($encontrados.ToArray())
+}
+
+function New-DialogButton {
+    param([string]$Text)
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $Text
+    $b.AutoSize = $true
+    $b.MinimumSize = New-Object System.Drawing.Size(0, 28)
+    $b.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+    return $b
+}
+
+function Show-LeftoversDialog {
+    param($Items)
+    $dlg = New-Object System.Windows.Forms.Form
+    try { $dlg.Icon = Get-AppIcon } catch { }
+    $dlg.Text = "$script:AppName - restos encontrados"
+    $dlg.Size = New-Object System.Drawing.Size(980, 520)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(700, 360)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Font = $script:uiFont
+
+    $aviso = New-Object System.Windows.Forms.Label
+    $aviso.Dock = 'Top'
+    $aviso.Height = 44
+    $aviso.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 0)
+    $aviso.Text = "Las de confianza ALTA vienen marcadas. Revisa las de confianza MEDIA antes de marcarlas.`nLo que quites va a la cuarentena (botón 'Cuarentena' de la pestaña) y se puede restaurar."
+
+    $lista = New-Object System.Windows.Forms.ListView
+    $lista.Dock = 'Fill'
+    $lista.View = 'Details'
+    $lista.CheckBoxes = $true
+    $lista.FullRowSelect = $true
+    $lista.Font = $script:uiFont
+    [void]$lista.Columns.Add('Tipo', 105)
+    [void]$lista.Columns.Add('Confianza', 75)
+    [void]$lista.Columns.Add('Ruta', 430)
+    [void]$lista.Columns.Add('Programa', 140)
+    [void]$lista.Columns.Add('Detalle', 200)
+    foreach ($x in @($Items | Sort-Object @{ Expression = { if ($_.Confidence -eq 'Alta') { 0 } else { 1 } } }, Program, Path)) {
+        $it = New-Object System.Windows.Forms.ListViewItem([string]$x.Kind)
+        [void]$it.SubItems.Add([string]$x.Confidence)
+        [void]$it.SubItems.Add([string]$x.Path)
+        [void]$it.SubItems.Add([string]$x.Program)
+        [void]$it.SubItems.Add([string]$x.Detail)
+        $it.Checked = ($x.Confidence -eq 'Alta')
+        if ($x.Confidence -ne 'Alta') { $it.ForeColor = [System.Drawing.Color]::FromArgb(140, 90, 0) }
+        $it.ToolTipText = [string]$x.Path
+        $it.Tag = $x
+        [void]$lista.Items.Add($it)
+    }
+    $lista.ShowItemToolTips = $true
+
+    $botones = New-Object System.Windows.Forms.FlowLayoutPanel
+    $botones.Dock = 'Bottom'
+    $botones.FlowDirection = 'RightToLeft'
+    $botones.Height = 44
+    $botones.Padding = New-Object System.Windows.Forms.Padding(0, 8, 8, 0)
+    $btnCerrar = New-DialogButton 'Cerrar'
+    $btnCerrar.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnMover = New-DialogButton 'Mover las marcadas a la cuarentena'
+    $btnMover.BackColor = [System.Drawing.Color]::FromArgb(160, 30, 30)
+    $btnMover.ForeColor = [System.Drawing.Color]::White
+    $btnAbrir = New-DialogButton 'Abrir ubicación'
+    $btnNinguna = New-DialogButton 'Desmarcar todas'
+    $botones.Controls.AddRange(@($btnCerrar, $btnMover, $btnAbrir, $btnNinguna))
+
+    $btnNinguna.add_Click({ foreach ($i in $lista.Items) { $i.Checked = $false } })
+    $btnAbrir.add_Click({
+        if ($lista.SelectedItems.Count -eq 0) { return }
+        $x = $lista.SelectedItems[0].Tag
+        if ($x.Kind -eq 'Registro') {
+            [System.Windows.Forms.Clipboard]::SetText([string]$x.Path)
+            [void][System.Windows.Forms.MessageBox]::Show(('Ruta copiada al portapapeles:{0}{0}{1}' -f [Environment]::NewLine, $x.Path), $script:AppName, 'OK', 'Information')
+        } else {
+            $objetivo = [string]$x.Path
+            if (Test-Path -LiteralPath $objetivo) {
+                Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('/select,"{0}"' -f $objetivo)
+            }
+        }
+    })
+    $btnMover.add_Click({
+        $marcadas = @($lista.CheckedItems | ForEach-Object { $_ })
+        if ($marcadas.Count -eq 0) { return }
+        $medias = @($marcadas | Where-Object { $_.Tag.Confidence -ne 'Alta' }).Count
+        $txt = 'Se van a mover {0} elementos a la cuarentena.' -f $marcadas.Count
+        if ($medias -gt 0) { $txt += "`n`n{0} son de confianza MEDIA: comprueba que no los usa otro programa." -f $medias }
+        $txt += "`n`n¿Continuar?"
+        if ([System.Windows.Forms.MessageBox]::Show($txt, "$script:AppName - restos", 'YesNo', 'Warning') -ne 'Yes') { return }
+        $ok = 0
+        $mal = 0
+        # Primero lo más profundo, para que no falle un hijo después de mover su carpeta.
+        foreach ($it in @($marcadas | Sort-Object @{ Expression = { ([string]$_.Tag.Path).Length }; Descending = $true })) {
+            $x = $it.Tag
+            try {
+                if ($x.Kind -eq 'Registro') {
+                    $id = Remove-RegistryKeyToQuarantine -Path $x.Path -Reason $x.Detail -Program $x.Program
+                } else {
+                    if (-not (Test-Path -LiteralPath $x.Path)) { $lista.Items.Remove($it); continue }
+                    $id = Move-ToQuarantine -Path $x.Path -Reason $x.Detail -Program $x.Program
+                }
+                Add-TabLog $script:uninstLog ('Resto a la cuarentena ({0}): {1}' -f $id, $x.Path) 'OK'
+                $lista.Items.Remove($it)
+                $ok++
+            } catch {
+                Add-TabLog $script:uninstLog ('No se pudo quitar {0}: {1}' -f $x.Path, $_.Exception.Message) 'WARN'
+                $it.ForeColor = [System.Drawing.Color]::FromArgb(190, 30, 30)
+                $mal++
+            }
+        }
+        [void][System.Windows.Forms.MessageBox]::Show(('Movidos a la cuarentena: {0}{2}Con errores: {1}' -f $ok, $mal, [Environment]::NewLine), $script:AppName, 'OK', 'Information')
+        if ($lista.Items.Count -eq 0) { $dlg.Close() }
+    })
+
+    $dlg.Controls.Add($lista)
+    $dlg.Controls.Add($aviso)
+    $dlg.Controls.Add($botones)
+    $dlg.CancelButton = $btnCerrar
+    [void]$dlg.ShowDialog($script:form)
+    $dlg.Dispose()
+}
+
+function Show-QuarantineDialog {
+    if (-not $script:IsAdmin) {
+        [void][System.Windows.Forms.MessageBox]::Show('La cuarentena necesita permisos de administrador.', $script:AppName, 'OK', 'Warning')
+        return
+    }
+    $dlg = New-Object System.Windows.Forms.Form
+    try { $dlg.Icon = Get-AppIcon } catch { }
+    $dlg.Text = "$script:AppName - cuarentena"
+    $dlg.Size = New-Object System.Drawing.Size(980, 480)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(700, 320)
+    $dlg.StartPosition = 'CenterParent'
+    $dlg.Font = $script:uiFont
+
+    $lista = New-Object System.Windows.Forms.ListView
+    $lista.Dock = 'Fill'
+    $lista.View = 'Details'
+    $lista.FullRowSelect = $true
+    $lista.MultiSelect = $true
+    $lista.HideSelection = $false
+    $lista.ShowItemToolTips = $true
+    $lista.Font = $script:uiFont
+    [void]$lista.Columns.Add('Fecha', 130)
+    [void]$lista.Columns.Add('Tipo', 90)
+    [void]$lista.Columns.Add('Ruta original', 450)
+    [void]$lista.Columns.Add('Programa', 140)
+    [void]$lista.Columns.Add('Motivo', 150)
+
+    $cargar = {
+        $lista.Items.Clear()
+        foreach ($e in @(Get-QuarantineItems)) {
+            $fecha = $e.Fecha
+            try { $fecha = ([datetime]$e.Fecha).ToString('dd/MM/yyyy HH:mm') } catch { }
+            $it = New-Object System.Windows.Forms.ListViewItem([string]$fecha)
+            [void]$it.SubItems.Add([string]$e.Tipo)
+            [void]$it.SubItems.Add([string]$e.Origen)
+            [void]$it.SubItems.Add([string]$e.Programa)
+            [void]$it.SubItems.Add([string]$e.Motivo)
+            $it.ToolTipText = [string]$e.Origen
+            $it.Tag = $e
+            [void]$lista.Items.Add($it)
+        }
+        $dlg.Text = '{0} - cuarentena ({1} elementos)' -f $script:AppName, $lista.Items.Count
+    }
+
+    $botones = New-Object System.Windows.Forms.FlowLayoutPanel
+    $botones.Dock = 'Bottom'
+    $botones.FlowDirection = 'RightToLeft'
+    $botones.Height = 44
+    $botones.Padding = New-Object System.Windows.Forms.Padding(0, 8, 8, 0)
+    $btnCerrar = New-DialogButton 'Cerrar'
+    $btnCerrar.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnRestaurar = New-DialogButton 'Restaurar'
+    $btnBorrar = New-DialogButton 'Borrar definitivamente'
+    $btnBorrar.ForeColor = [System.Drawing.Color]::FromArgb(160, 30, 30)
+    $botones.Controls.AddRange(@($btnCerrar, $btnRestaurar, $btnBorrar))
+
+    $btnRestaurar.add_Click({
+        $sel = @($lista.SelectedItems | ForEach-Object { $_.Tag })
+        if ($sel.Count -eq 0) { return }
+        if ([System.Windows.Forms.MessageBox]::Show(('¿Devolver {0} elementos a su ubicación original?' -f $sel.Count), "$script:AppName - cuarentena", 'YesNo', 'Question') -ne 'Yes') { return }
+        $errores = @()
+        foreach ($e in $sel) {
+            try {
+                [void](Restore-QuarantineItem -Id $e.Id)
+                Add-TabLog $script:uninstLog ('Restaurado desde la cuarentena: {0}' -f $e.Origen) 'OK'
+            } catch {
+                $errores += ('{0}: {1}' -f $e.Origen, $_.Exception.Message)
+                Add-TabLog $script:uninstLog ('No se pudo restaurar {0}: {1}' -f $e.Origen, $_.Exception.Message) 'WARN'
+            }
+        }
+        & $cargar
+        if ($errores.Count -gt 0) {
+            [void][System.Windows.Forms.MessageBox]::Show(("No se pudieron restaurar:`n`n" + ($errores -join "`n")), $script:AppName, 'OK', 'Warning')
+        }
+    })
+    $btnBorrar.add_Click({
+        $sel = @($lista.SelectedItems | ForEach-Object { $_.Tag })
+        if ($sel.Count -eq 0) { return }
+        if ([System.Windows.Forms.MessageBox]::Show(('Se van a borrar DEFINITIVAMENTE {0} elementos. Después no se podrán restaurar.`n`n¿Continuar?' -f $sel.Count), "$script:AppName - cuarentena", 'YesNo', 'Warning') -ne 'Yes') { return }
+        foreach ($e in $sel) {
+            try {
+                Remove-QuarantineItem -Id $e.Id
+                Add-TabLog $script:uninstLog ('Borrado de la cuarentena: {0}' -f $e.Origen) 'OK'
+            } catch {
+                Add-TabLog $script:uninstLog ('No se pudo borrar de la cuarentena {0}: {1}' -f $e.Origen, $_.Exception.Message) 'WARN'
+            }
+        }
+        & $cargar
+    })
+
+    & $cargar
+    $dlg.Controls.Add($lista)
+    $dlg.Controls.Add($botones)
+    $dlg.CancelButton = $btnCerrar
+    [void]$dlg.ShowDialog($script:form)
+    $dlg.Dispose()
 }
 
 $tabUninstall = New-Object System.Windows.Forms.TabPage
@@ -5442,6 +6007,9 @@ $uninstRight.Controls.Add($script:btnUninstAll)
 $script:btnUninstRefresh = New-ActionButton 'Actualizar lista'
 $uninstRight.Controls.Add($script:btnUninstRefresh)
 
+$script:btnUninstQuarantine = New-ActionButton 'Cuarentena'
+$uninstRight.Controls.Add($script:btnUninstQuarantine)
+
 $script:uninstSplit = New-Object System.Windows.Forms.SplitContainer
 $script:uninstSplit.Dock = 'Fill'
 $script:uninstSplit.Orientation = 'Vertical'
@@ -5554,6 +6122,7 @@ $script:btnUninstRun.add_Click({
 
 $script:btnUninstStop.add_Click({ Stop-UninstallQueue })
 $script:btnUninstDanger.add_Click({ Show-UninstallDangerInfo })
+$script:btnUninstQuarantine.add_Click({ Show-QuarantineDialog })
 
 $script:btnUninstAll.add_Click({
     if ($script:uninstProcess) { return }

@@ -6,6 +6,10 @@
 - Módulo común de seguridad: punto de restauración verificado (`New-WinTallerRestorePoint`), copia de claves del registro antes de borrarlas y cuarentena en `C:\ProgramData\WinTaller\cuarentena` (carpetas, archivos y claves) con restauración a su ruta original. Nunca se mueven ni borran rutas o claves protegidas del sistema.
 - Desinstalar: crea un punto de restauración antes de empezar y pide confirmación si no se puede verificar.
 
+**Novedades**
+- Desinstalar: al terminar, busca los restos de cada programa desinstalado (carpeta de instalación, carpetas con su nombre o el del fabricante en Program Files, ProgramData y AppData, accesos directos rotos y claves en `HKLM\SOFTWARE`, `WOW6432Node` y `HKCU\Software`). Solo coincidencias exactas de nombre, nunca algo que use otro programa instalado. Los de confianza alta vienen marcados; lo que se quita va a la cuarentena.
+- Desinstalar: botón **Cuarentena** para ver, restaurar o borrar definitivamente lo que se ha quitado.
+
 **Correcciones**
 - Desinstalar: se espera a los procesos hijo del desinstalador (NSIS, Inno Setup…). Antes, los que se copian a TEMP y salen enseguida se daban por terminados mientras seguían trabajando. Al detener la cola también se cierran esos procesos.
 
