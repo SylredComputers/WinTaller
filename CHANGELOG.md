@@ -16,6 +16,7 @@
 - Instalar: nueva categoría **IA** con ChatGPT (desde la Microsoft Store), Claude, OpenCode y OpenCode CLI. El instalador admite paquetes del origen `msstore`.
 
 **Correcciones**
+- Windows más ágil y demás ajustes del equipo: la columna "Recomendado" pone "Ya aplicado" cuando el ajuste ya está activo, y "Aplicar marcados" se salta los que ya están aplicados (lo anota en el registro) en lugar de volver a escribirlos.
 - Desinstalar: se espera a los procesos hijo del desinstalador (NSIS, Inno Setup…). Antes, los que se copian a TEMP y salen enseguida se daban por terminados mientras seguían trabajando. Al detener la cola también se cierran esos procesos.
 
 ## v2.1.2

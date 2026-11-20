@@ -7433,7 +7433,9 @@ function Update-EquipoList {
             $textoEstado = [string]$estado.Text
             if ($estado.Applied) { $textoEstado = [char]0x2713 + ' ' + $textoEstado }
             [void]$item.SubItems.Add($textoEstado)
-            [void]$item.SubItems.Add($(if ($recomendada) { 'Sí' } else { '' }))
+            $textoRec = ''
+            if ($recomendada) { $textoRec = $(if ($estado.Applied) { 'Ya aplicado' } else { 'Sí' }) }
+            [void]$item.SubItems.Add($textoRec)
             $item.Tag = [pscustomobject]@{ Action = $accion; State = $estado; Recommended = $recomendada }
             $item.ToolTipText = [string]$accion.Description
             if ($grupos.ContainsKey([string]$accion.Group)) { $item.Group = $grupos[[string]$accion.Group] }
@@ -7567,6 +7569,22 @@ function Invoke-EquipoActions {
         [void][System.Windows.Forms.MessageBox]::Show('Marca al menos un ajuste de la lista.', $script:AppName, 'OK', 'Information')
         return
     }
+    # Se vuelve a leer el estado: lo que ya está aplicado no se toca.
+    $yaAplicados = @()
+    $pendientes = @()
+    foreach ($item in $marcados) {
+        $estadoAhora = Get-EquipoActionState $item.Tag.Action
+        if ($estadoAhora.Applied) { $yaAplicados += $item } else { $pendientes += $item }
+    }
+    foreach ($item in $yaAplicados) {
+        Add-TabLog $script:eqLog ('{0}: ya estaba aplicado, no se cambia nada.' -f $item.Tag.Action.Name)
+    }
+    if ($pendientes.Count -eq 0) {
+        [void][System.Windows.Forms.MessageBox]::Show('Los ajustes marcados ya están aplicados en este equipo. No hay nada que cambiar.', $script:AppName, 'OK', 'Information')
+        Update-EquipoList
+        return
+    }
+    $marcados = $pendientes
     $seleccionadas = @($marcados | ForEach-Object { $_.Tag.Action })
     $necesitaAdmin = @($seleccionadas | Where-Object { $_.NeedsAdmin }).Count -gt 0
     if ($necesitaAdmin -and -not (Assert-Admin)) { return }
