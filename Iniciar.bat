@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions
-title WinTaller
 cd /d "%~dp0"
 
 set "PS1=%~dp0WinTaller.ps1"
 if not exist "%PS1%" (
+    title WinTaller
     echo.
     echo No se encontro WinTaller.ps1 en esta carpeta.
     echo Asegurate de que este archivo .bat y el .ps1 estan juntos.
@@ -13,32 +13,8 @@ if not exist "%PS1%" (
     exit /b 1
 )
 
-rem --- Evitar bucles de elevacion: si ya venimos elevados, ejecutar ---
-if /i "%~1"=="/elevated" goto :run
-
-rem --- Comprobar permisos de administrador (rutas completas: cmd busca primero en esta carpeta) ---
-"%SystemRoot%\System32\fltmc.exe" >nul 2>&1
-if not errorlevel 1 goto :run
-
-echo Solicitando permisos de administrador...
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%~f0' -ArgumentList '/elevated' -Verb RunAs -ErrorAction Stop } catch { Write-Host ''; Write-Host 'No se pudo solicitar la elevacion de permisos:'; Write-Host $_.Exception.Message; exit 1 }"
-if errorlevel 1 pause
+rem --- Abre WinTaller sin consola visible y con permisos de administrador ---
+rem Si algo falla al arrancar, usa Diagnostico.bat: deja la consola abierta
+rem y el detalle queda en diagnostico.log.
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$a = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File {0}{1}{0}' -f [char]34, $env:PS1; try { Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $a -Verb RunAs -WindowStyle Hidden -ErrorAction Stop } catch { Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show('No se ha podido abrir WinTaller con permisos de administrador.' + [Environment]::NewLine + [Environment]::NewLine + $_.Exception.Message, 'WinTaller', 'OK', 'Warning') }"
 exit /b 0
-
-:run
-echo.
-echo  WinTaller
-echo  ---------
-echo  Esta ventana puede quedarse abierta detras del programa.
-echo  Si la ventana grafica no aparece, revisa diagnostico.log.
-echo.
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -STA -File "%PS1%"
-set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" (
-    echo.
-    echo El programa termino con el codigo %RC%.
-    echo Revisa diagnostico.log para ver el detalle.
-    echo.
-    pause
-)
-exit /b %RC%

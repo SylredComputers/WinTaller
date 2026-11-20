@@ -216,8 +216,8 @@ function Restart-Elevated {
         $script:instanceMutex = $null
     }
     try {
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
-        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Verb RunAs | Out-Null
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$PSCommandPath`""
+        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden | Out-Null
         return $true
     } catch {
         return $false
