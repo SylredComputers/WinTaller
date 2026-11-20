@@ -2169,10 +2169,13 @@ function Start-NextWinget {
     }
     $script:wingetErrFile = $script:wingetOutFile + '.err'
 
+    # Las apps de la Microsoft Store (Kind 'msstore') se piden al origen msstore.
+    $origen = 'winget'
+    if ($app.Kind -eq 'msstore') { $origen = 'msstore' }
     $argumentos = @(
         'install', '--id', $app.Id, '--exact', '--silent',
         '--accept-package-agreements', '--accept-source-agreements',
-        '--disable-interactivity', '--source', 'winget'
+        '--disable-interactivity', '--source', $origen
     )
 
     try {
@@ -2699,6 +2702,115 @@ function New-ActionButton {
 }
 
 # ---------------------------------------------------------------------------
+# Limpieza de navegadores
+# ---------------------------------------------------------------------------
+# Cada navegador indica dónde guarda sus datos y con qué proceso se ejecuta.
+# Solo se borran carpetas de caché (nunca historial, contraseñas, cookies ni
+# pestañas). Opera y Opera GX usan el mismo opera.exe: se distinguen por ruta.
+
+$script:BrowserCatalog = @(
+    [pscustomobject]@{ Name = 'Google Chrome';   Engine = 'Chromium'; Process = 'chrome';  PathLike = '';            PathNotLike = '*\Chromium\*'; Roots = @('%LOCALAPPDATA%\Google\Chrome\User Data') },
+    [pscustomobject]@{ Name = 'Microsoft Edge';  Engine = 'Chromium'; Process = 'msedge';  PathLike = '';            PathNotLike = '';             Roots = @('%LOCALAPPDATA%\Microsoft\Edge\User Data') },
+    [pscustomobject]@{ Name = 'Brave';           Engine = 'Chromium'; Process = 'brave';   PathLike = '';            PathNotLike = '';             Roots = @('%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data') },
+    [pscustomobject]@{ Name = 'Vivaldi';         Engine = 'Chromium'; Process = 'vivaldi'; PathLike = '';            PathNotLike = '';             Roots = @('%LOCALAPPDATA%\Vivaldi\User Data') },
+    [pscustomobject]@{ Name = 'Opera';           Engine = 'Chromium'; Process = 'opera';   PathLike = '';            PathNotLike = '*\Opera GX\*'; Roots = @('%LOCALAPPDATA%\Opera Software\Opera Stable', '%APPDATA%\Opera Software\Opera Stable') },
+    [pscustomobject]@{ Name = 'Opera GX';        Engine = 'Chromium'; Process = 'opera';   PathLike = '*\Opera GX\*'; PathNotLike = '';            Roots = @('%LOCALAPPDATA%\Opera Software\Opera GX Stable', '%APPDATA%\Opera Software\Opera GX Stable') },
+    [pscustomobject]@{ Name = 'Mozilla Firefox'; Engine = 'Firefox';  Process = 'firefox'; PathLike = '';            PathNotLike = '';             Roots = @('%LOCALAPPDATA%\Mozilla\Firefox\Profiles') }
+)
+
+# Subcarpetas de caché que Chromium crea en cada perfil y en la raíz de datos.
+$script:ChromiumCacheDirs = @('Cache', 'Code Cache', 'GPUCache', 'DawnCache', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache')
+$script:FirefoxCacheDirs  = @('cache2', 'startupCache')
+
+# Devuelve las carpetas de caché existentes de un navegador.
+function Get-BrowserCacheFolders {
+    param([Parameter(Mandatory = $true)]$Browser)
+    $carpetas = New-Object System.Collections.Generic.List[string]
+    $nombres = if ($Browser.Engine -eq 'Firefox') { $script:FirefoxCacheDirs } else { $script:ChromiumCacheDirs }
+    foreach ($plantilla in $Browser.Roots) {
+        $raiz = [Environment]::ExpandEnvironmentVariables($plantilla)
+        if (-not (Test-Path -LiteralPath $raiz -PathType Container)) { continue }
+        # La raíz y sus perfiles (Default, Profile 1, xxxx.default-release...).
+        $bases = @(Get-Item -LiteralPath $raiz -Force -ErrorAction SilentlyContinue)
+        $bases += @(Get-ChildItem -LiteralPath $raiz -Directory -Force -ErrorAction SilentlyContinue)
+        $reparse = [System.IO.FileAttributes]::ReparsePoint
+        foreach ($base in $bases) {
+            if (-not $base -or (($base.Attributes -band $reparse) -eq $reparse)) { continue }
+            foreach ($nombre in $nombres) {
+                $ruta = Join-Path $base.FullName $nombre
+                if ((Test-Path -LiteralPath $ruta -PathType Container) -and -not $carpetas.Contains($ruta)) {
+                    $carpetas.Add($ruta)
+                }
+            }
+        }
+    }
+    return $carpetas.ToArray()
+}
+
+# Navegadores con datos en este perfil de usuario.
+function Get-InstalledBrowsers {
+    $lista = @()
+    foreach ($b in $script:BrowserCatalog) {
+        foreach ($plantilla in $b.Roots) {
+            if (Test-Path -LiteralPath ([Environment]::ExpandEnvironmentVariables($plantilla)) -PathType Container) {
+                $lista += $b
+                break
+            }
+        }
+    }
+    return $lista
+}
+
+# Procesos del navegador en la sesión actual (no toca otras sesiones de usuario).
+function Get-BrowserProcesses {
+    param([Parameter(Mandatory = $true)]$Browser)
+    $sesion = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    $procesos = @(Get-Process -Name $Browser.Process -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sesion })
+    if ($Browser.PathLike -or $Browser.PathNotLike) {
+        $procesos = @($procesos | Where-Object {
+            $ruta = ''
+            try { $ruta = [string]$_.Path } catch { }
+            if (-not $ruta) { return [bool]$Browser.PathNotLike }   # sin ruta: se asume el navegador principal
+            if ($Browser.PathLike -and $ruta -notlike $Browser.PathLike) { return $false }
+            if ($Browser.PathNotLike -and $ruta -like $Browser.PathNotLike) { return $false }
+            return $true
+        })
+    }
+    return $procesos
+}
+
+# Pide cerrar las ventanas (como pulsar la X) y espera. Devuelve los navegadores
+# que siguen con procesos abiertos (ventanas que no se cierran o segundo plano).
+function Close-BrowsersGracefully {
+    param([object[]]$Browsers, [int]$TimeoutSeconds = 12)
+    $reloj = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($reloj.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $quedan = 0
+        foreach ($b in $Browsers) {
+            foreach ($p in (Get-BrowserProcesses $b)) {
+                $quedan++
+                try { if ($p.MainWindowHandle -ne [IntPtr]::Zero) { [void]$p.CloseMainWindow() } } catch { }
+            }
+        }
+        if ($quedan -eq 0 -or $script:optCancel) { break }
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 700
+    }
+    return @($Browsers | Where-Object { @(Get-BrowserProcesses $_).Count -gt 0 })
+}
+
+function Stop-BrowsersForced {
+    param([object[]]$Browsers)
+    foreach ($b in $Browsers) {
+        foreach ($p in (Get-BrowserProcesses $b)) {
+            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>&1 | Out-Null } catch { }
+        }
+    }
+    Start-Sleep -Milliseconds 1500
+    return @($Browsers | Where-Object { @(Get-BrowserProcesses $_).Count -gt 0 })
+}
+
+# ---------------------------------------------------------------------------
 # Tareas de optimización
 # ---------------------------------------------------------------------------
 
@@ -3053,40 +3165,77 @@ $script:tasks = @(
     },
     [pscustomobject]@{
         Name        = 'Limpiar cache de navegadores'
-        Description = 'Borra las caches de Chrome, Edge y Firefox (no las contraseñas, el historial ni las pestañas). Cierra antes los navegadores para que la limpieza funcione del todo.'
+        Description = 'Detecta los navegadores instalados (Chrome, Edge, Brave, Vivaldi, Opera, Opera GX y Firefox) y borra su caché. Si alguno está abierto, ofrece cerrarlo. No toca el historial, las contraseñas, las cookies ni las pestañas.'
         Recommended = $false
-        Confirm     = 'Cierra Chrome, Edge y Firefox antes de continuar. Se borraran solo archivos de cache, no el historial ni las contraseñas. Continuar?'
+        Confirm     = $null
         Run         = {
-            $rutas = @()
-            $baseChrome = Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data'
-            $baseEdge   = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
-            foreach ($base in @($baseChrome, $baseEdge)) {
-                if (-not (Test-Path -LiteralPath $base)) { continue }
-                Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                    foreach ($sub in @('Cache','Code Cache','GPUCache')) {
-                        $ruta = Join-Path $_.FullName $sub
-                        if (Test-Path -LiteralPath $ruta) { $rutas += $ruta }
+            $navegadores = @(Get-InstalledBrowsers)
+            if ($navegadores.Count -eq 0) {
+                Write-Log 'No se ha encontrado ningún navegador compatible en este usuario.' 'WARN'
+                $script:optTaskSkipped = $true
+                return
+            }
+            Write-Log ('Navegadores detectados: {0}' -f (($navegadores | ForEach-Object { $_.Name }) -join ', '))
+
+            $abiertos = @($navegadores | Where-Object { @(Get-BrowserProcesses $_).Count -gt 0 })
+            $omitir = @()
+            if ($abiertos.Count -gt 0) {
+                $lista = ($abiertos | ForEach-Object { ' - ' + $_.Name }) -join "`n"
+                $pregunta = "Estos navegadores están abiertos:`n`n$lista`n`nPara borrar su caché hay que cerrarlos. Guarda antes lo que tengas a medias (formularios, descargas en curso). Al volver a abrirlos podrás recuperar las pestañas.`n`nSí: cerrarlos ahora y limpiar todos`nNo: limpiar solo los que están cerrados`nCancelar: no limpiar navegadores"
+                $respuesta = [System.Windows.Forms.MessageBox]::Show($pregunta, "$script:AppName - navegadores abiertos", 'YesNoCancel', 'Warning')
+                if ($respuesta -eq 'Cancel') {
+                    Write-Log 'Limpieza de navegadores cancelada por el usuario.' 'WARN'
+                    $script:optTaskSkipped = $true
+                    return
+                }
+                if ($respuesta -eq 'Yes') {
+                    Write-Log ('Cerrando: {0}...' -f (($abiertos | ForEach-Object { $_.Name }) -join ', '))
+                    $script:statusLabel.Text = 'Cerrando navegadores...'
+                    $siguen = @(Close-BrowsersGracefully -Browsers $abiertos)
+                    if ($siguen.Count -gt 0 -and -not $script:optCancel) {
+                        $lista = ($siguen | ForEach-Object { ' - ' + $_.Name }) -join "`n"
+                        $forzar = "Estos navegadores siguen abiertos (puede que tengan una ventana pidiendo confirmación o procesos en segundo plano):`n`n$lista`n`nQuieres forzar el cierre? Al abrirlos de nuevo pueden mostrar el aviso de 'no se cerró correctamente' y ofrecer restaurar las pestañas."
+                        if ([System.Windows.Forms.MessageBox]::Show($forzar, "$script:AppName - navegadores abiertos", 'YesNo', 'Warning') -eq 'Yes') {
+                            $siguen = @(Stop-BrowsersForced -Browsers $siguen)
+                        }
                     }
+                    $omitir = $siguen
+                } else {
+                    $omitir = $abiertos
                 }
+                foreach ($b in $omitir) { Write-Log ('{0}: sigue abierto, se omite.' -f $b.Name) 'WARN' }
             }
-            $baseFirefox = Join-Path $env:LOCALAPPDATA 'Mozilla\Firefox\Profiles'
-            if (Test-Path -LiteralPath $baseFirefox) {
-                Get-ChildItem -LiteralPath $baseFirefox -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                    $ruta = Join-Path $_.FullName 'cache2'
-                    if (Test-Path -LiteralPath $ruta) { $rutas += $ruta }
-                }
-            }
+
             $total = 0
-            foreach ($ruta in ($rutas | Select-Object -Unique)) {
-                try {
-                    $suma = (Get-ChildItem -LiteralPath $ruta -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
-                    if ($suma) { $total += $suma }
-                    Get-ChildItem -LiteralPath $ruta -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                        try { Remove-FileSystemInfoSafe -Info $_ } catch { }
-                    }
-                } catch { }
+            $carpetasTotal = 0
+            $limpiados = 0
+            foreach ($b in $navegadores) {
+                if ($script:optCancel) { break }
+                if (@($omitir | Where-Object { $_.Name -eq $b.Name }).Count -gt 0) { continue }
+                $script:statusLabel.Text = ('Limpiando caché de {0}...' -f $b.Name)
+                $bytes = 0
+                $carpetas = @(Get-BrowserCacheFolders -Browser $b)
+                foreach ($ruta in $carpetas) {
+                    try {
+                        $suma = (Get-ChildItem -LiteralPath $ruta -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                        if ($suma) { $bytes += $suma }
+                        Get-ChildItem -LiteralPath $ruta -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                            try { Remove-FileSystemInfoSafe -Info $_ } catch { }
+                        }
+                    } catch { }
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+                $total += $bytes
+                $carpetasTotal += $carpetas.Count
+                $limpiados++
+                Write-Log ('{0}: {1} MB en {2} carpeta(s) de caché.' -f $b.Name, [math]::Round($bytes / 1MB, 1), $carpetas.Count)
             }
-            Write-Log ('Cache de navegadores limpiada: {0} MB en {1} carpetas.' -f [math]::Round($total / 1MB, 1), $rutas.Count) 'OK'
+            if ($limpiados -eq 0) {
+                Write-Log 'No se ha limpiado ningún navegador (todos seguían abiertos).' 'WARN'
+                $script:optTaskSkipped = $true
+                return
+            }
+            Write-Log ('Caché de navegadores limpiada: {0} MB en {1} carpetas ({2} navegador(es)).' -f [math]::Round($total / 1MB, 1), $carpetasTotal, $limpiados) 'OK'
         }
     },
     [pscustomobject]@{
@@ -4442,6 +4591,11 @@ $script:appCatalog = @(
     (New-AppEntry 'Windows Terminal' 'Desarrollo' 'Microsoft.WindowsTerminal' 'Terminal moderna de Windows.' $false),
     (New-AppEntry 'PowerShell 7' 'Desarrollo' 'Microsoft.PowerShell' 'Versión moderna de PowerShell.' $false),
     (New-AppEntry 'Postman' 'Desarrollo' 'Postman.Postman' 'Pruebas de APIs HTTP.' $false),
+
+    (New-AppEntry -Name 'ChatGPT' -Category 'IA' -Id '9NT1R1C2HH7J' -Note 'Aplicación oficial de ChatGPT (OpenAI). Se instala desde la Microsoft Store.' -Kind 'msstore'),
+    (New-AppEntry 'Claude' 'IA' 'Anthropic.Claude' 'Aplicación oficial de Claude (Anthropic) para escritorio.' $false),
+    (New-AppEntry 'OpenCode' 'IA' 'SST.OpenCodeDesktop' 'Asistente de programación con IA de código abierto (aplicación de escritorio).' $false),
+    (New-AppEntry 'OpenCode CLI' 'IA' 'SST.opencode' 'OpenCode para la terminal: se usa con el comando opencode.' $false),
 
     (New-AppEntry 'Rufus' 'Utilidades' 'Rufus.Rufus' 'Crea USB de arranque desde una ISO.' $false),
     (New-AppEntry 'Ventoy' 'Utilidades' 'Ventoy.Ventoy' 'Varias ISO de arranque en un solo USB.' $false),

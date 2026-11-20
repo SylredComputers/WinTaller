@@ -12,6 +12,8 @@
 - Optimización: botón **Carpetas vacías**. Busca carpetas sin ningún archivo en Program Files, ProgramData y AppData de programas que ya no están instalados (no entra en carpetas de Windows, Microsoft ni fabricantes de hardware, no sigue enlaces y no toca nada cambiado en los últimos 7 días). Lo que se quita va a la cuarentena.
 - Windows más ágil: segundos en el reloj, archivos ocultos visibles, "Hibernar" en el menú de apagado, quitar la búsqueda web del menú Inicio y sudo para Windows (11 24H2). Todas con **Deshacer**.
 - Energía: plan **Máximo rendimiento** (se crea la copia del plan oculto si no existe).
+- Limpieza: **Limpiar cache de navegadores** detecta los navegadores instalados (Chrome, Edge, Brave, Vivaldi, Opera, Opera GX y Firefox). Si alguno está abierto, avisa y ofrece cerrarlo (primero de forma normal y, si no responde, forzando el cierre) o limpiar solo los cerrados. Borra también las cachés de sombreadores y GPU, e informa de lo liberado por navegador. Nunca toca historial, contraseñas, cookies ni pestañas.
+- Instalar: nueva categoría **IA** con ChatGPT (desde la Microsoft Store), Claude, OpenCode y OpenCode CLI. El instalador admite paquetes del origen `msstore`.
 
 **Correcciones**
 - Desinstalar: se espera a los procesos hijo del desinstalador (NSIS, Inno Setup…). Antes, los que se copian a TEMP y salen enseguida se daban por terminados mientras seguían trabajando. Al detener la cola también se cierran esos procesos.
